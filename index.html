@@ -5,9 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>道の駅おけがわ 棚卸アプリ</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- バーコード高速認識 Quagga2 -->
     <script src="https://cdn.jsdelivr.net/npm/@ericblade/quagga2@1.8.4/dist/quagga.min.js"></script>
-    <!-- Excel (.xlsx) 投げ込み読込用 SheetJS -->
     <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
     <style>
         body {
@@ -39,17 +37,18 @@
 
     <!-- 共通コンパクトヘッダー -->
     <header class="bg-slate-900 text-white px-2 py-1.5 flex items-center justify-between gap-1 sticky top-0 z-30 shadow">
-        <div class="flex items-center gap-1.5 min-w-0">
+        <div class="flex items-center gap-1 min-w-0">
             <span id="sync-status-dot" class="w-2.5 h-2.5 rounded-full bg-slate-500 shrink-0" title="同期状態"></span>
-            <select id="worker-select" onchange="onWorkerChange(this.value)" class="bg-slate-800 border border-slate-600 text-amber-300 font-bold text-xs rounded px-1.5 py-1 outline-none max-w-[110px]"></select>
+            <select id="worker-select" onchange="onWorkerChange(this.value)" class="bg-slate-800 border border-slate-600 text-amber-300 font-bold text-xs rounded px-1 py-1 outline-none max-w-[95px]"></select>
             <button onclick="openGasUrlModal()" class="bg-slate-800 border border-slate-600 text-[11px] px-1.5 py-1 rounded shrink-0">⚙️接続</button>
         </div>
 
         <div class="flex items-center gap-1 shrink-0">
             <button onclick="fetchAllFromGasApi(true)" class="bg-sky-700 text-white font-bold text-[11px] px-1.5 py-1 rounded">🔄同期</button>
+            <button id="btn-tts" onclick="toggleTts()" class="bg-amber-600 text-white font-bold text-[11px] px-1.5 py-1 rounded">🗣️声:ON</button>
             <button id="btn-sound" onclick="toggleSound()" class="bg-slate-800 border border-slate-700 text-[11px] px-1.5 py-1 rounded">🔊音</button>
             <button onclick="openBackupModal()" class="bg-emerald-700 text-white font-bold text-[11px] px-1.5 py-1 rounded">💾保存</button>
-            <button id="btn-mode-switch" onclick="requestAdminView()" class="bg-slate-700 border border-slate-500 text-white font-bold text-[11px] px-2 py-1 rounded">🔒管理PC</button>
+            <button id="btn-mode-switch" onclick="requestAdminView()" class="bg-slate-700 border border-slate-500 text-white font-bold text-[11px] px-1.5 py-1 rounded">🔒管理</button>
         </div>
     </header>
 
@@ -58,34 +57,36 @@
     <!-- ========================================================== -->
     <main id="mobile-view" class="flex-1 max-w-md w-full mx-auto p-2 flex flex-col gap-1.5">
 
-        <!-- ① 用紙No.選択 ＆ モード切替（事前ピックアップ / 当日カウント） -->
+        <!-- ① 用紙No.選択・区画編集・マスタ件数 -->
         <div class="bg-white rounded-xl p-2 shadow-sm border border-slate-200 flex flex-col gap-1.5">
-            <div class="flex items-center gap-1.5">
-                <select id="m-sheet-no" onchange="onSheetNoChange(this.value)" class="flex-1 bg-slate-100 border border-slate-300 rounded-lg px-2 py-1.5 font-extrabold text-sm text-slate-900"></select>
-                <span id="m-sheet-count-badge" class="bg-slate-800 text-white text-[11px] font-bold px-2 py-1.5 rounded-lg shrink-0">0/40行</span>
+            <div class="flex items-center gap-1">
+                <select id="m-sheet-no" onchange="onSheetNoChange(this.value)" class="flex-1 min-w-0 bg-slate-100 border border-slate-300 rounded-lg px-2 py-1.5 font-extrabold text-sm text-slate-900"></select>
+                <button onclick="openEditSheetNameModal()" class="bg-slate-200 text-slate-700 text-[11px] font-bold px-2 py-1.5 rounded-lg shrink-0" title="用紙の区画名を設定">✏️区画</button>
+                <span id="m-sheet-count-badge" class="bg-slate-800 text-white text-[11px] font-bold px-2 py-1.5 rounded-lg shrink-0">0/40</span>
                 <span id="m-uncounted-badge" class="bg-rose-600 text-white text-[11px] font-bold px-2 py-1.5 rounded-lg shrink-0">未0</span>
             </div>
 
-            <!-- 作業モード切替 -->
-            <div class="grid grid-cols-2 gap-1 bg-slate-100 p-1 rounded-lg text-xs font-bold">
-                <button id="mode-btn-count" onclick="setWorkMode('count')" class="py-1.5 rounded-md bg-blue-600 text-white shadow">
-                    🔢 当日カウント
-                </button>
-                <button id="mode-btn-pickup" onclick="setWorkMode('pickup')" class="py-1.5 rounded-md text-slate-600">
-                    📋 前日ピックアップ
+            <!-- 作業モード切替 ＋ マスタ件数ステータス -->
+            <div class="flex items-center justify-between gap-1">
+                <div class="flex-1 grid grid-cols-2 gap-1 bg-slate-100 p-0.5 rounded-lg text-[11px] font-bold">
+                    <button id="mode-btn-count" onclick="setWorkMode('count')" class="py-1 rounded-md bg-blue-600 text-white shadow">🔢 当日カウント</button>
+                    <button id="mode-btn-pickup" onclick="setWorkMode('pickup')" class="py-1 rounded-md text-slate-600">📋 前日ピックアップ</button>
+                </div>
+                <button onclick="downloadProductsFromGas()" id="m-master-badge" class="bg-indigo-50 border border-indigo-200 text-indigo-800 text-[10px] font-bold px-2 py-1.5 rounded-lg shrink-0">
+                    台帳:0件
                 </button>
             </div>
 
-            <!-- カメラ・JAN手入力・音声入力バー -->
+            <!-- カメラ・JAN手入力・手入力追加・音声バー -->
             <div class="flex gap-1">
                 <button id="btn-cam-toggle" onclick="toggleCameraScanner()" class="tap-btn bg-emerald-600 text-white font-bold text-xs px-2.5 py-1.5 rounded-lg shrink-0">
                     📷<span id="cam-btn-label">スキャン</span>
                 </button>
-                <input id="barcode-input" type="text" inputmode="numeric" placeholder="JAN手入力 / リーダー"
+                <input id="barcode-input" type="text" inputmode="numeric" placeholder="JAN手入力"
                        onkeydown="if(event.key==='Enter') handleBarcodeScan(this.value)"
                        class="flex-1 min-w-0 bg-slate-50 border border-slate-300 rounded-lg px-2 py-1 text-xs font-mono">
-                <button onclick="handleBarcodeScan(document.getElementById('barcode-input').value)" class="tap-btn bg-slate-800 text-white text-xs font-bold px-2.5 py-1.5 rounded-lg shrink-0">
-                    追加
+                <button onclick="openManualAddProductModal()" class="tap-btn bg-amber-500 text-slate-950 text-xs font-bold px-2 py-1.5 rounded-lg shrink-0">
+                    ＋手入力
                 </button>
                 <button id="btn-voice-toggle" onclick="toggleVoiceRecognition()" class="tap-btn bg-rose-600 text-white text-xs font-bold px-2 py-1.5 rounded-lg shrink-0">
                     🎤<span id="voice-btn-label">声</span>
@@ -96,15 +97,17 @@
                 🎤 <span id="voice-transcript">聞き取り待機中...</span>
             </div>
 
-            <!-- カメラプレビュー枠 -->
+            <!-- カメラプレビュー枠（縦横全方向対応） -->
             <canvas id="decode-canvas" class="hidden"></canvas>
-            <div id="camera-wrapper" class="hidden relative w-full h-36 bg-black rounded-lg overflow-hidden border border-slate-700">
+            <div id="camera-wrapper" class="hidden relative w-full h-44 bg-black rounded-lg overflow-hidden border border-slate-700">
                 <canvas id="preview-canvas" class="w-full h-full block"></canvas>
                 <div id="scan-overlay" class="absolute inset-0 pointer-events-none">
-                    <div class="absolute inset-x-[14%] inset-y-[14%] border-2 border-emerald-400 rounded-lg shadow-[0_0_0_9999px_rgba(0,0,0,0.45)]"></div>
+                    <!-- 縦横どちらでも入る正方形ガイド枠 -->
+                    <div class="absolute inset-x-[15%] inset-y-[10%] border-2 border-emerald-400 rounded-lg shadow-[0_0_0_9999px_rgba(0,0,0,0.45)]"></div>
                     <div class="laser-line"></div>
+                    <span id="scan-debug-info" class="absolute top-1.5 left-1.5 bg-black/75 text-amber-300 text-[10px] font-mono px-1.5 py-0.5 rounded">解析中</span>
                     <span id="scan-mode-hint" class="absolute bottom-1 left-1/2 -translate-x-1/2 bg-black/80 text-emerald-300 text-[10px] px-2 py-0.5 rounded-full whitespace-nowrap">
-                        バーコードを緑枠に合わせてください
+                        縦・横どちらのバーコードでも読めます
                     </span>
                 </div>
                 <div class="absolute top-1.5 right-1.5 flex gap-1 z-10">
@@ -115,20 +118,24 @@
             </div>
         </div>
 
-        <!-- ② 現在選択中の商品カード（棚上・棚下・合計・金額） -->
+        <!-- ② 現在選択中の商品カード（棚上・棚下・合計・先月実績・読上） -->
         <div id="count-card-area" class="bg-slate-900 text-white rounded-xl p-2.5 shadow border border-slate-700">
-            <div class="flex items-center justify-between text-[11px] text-slate-300 mb-0.5">
+            <div class="flex items-center justify-between text-[11px] text-slate-300 mb-0.5 gap-1">
                 <span id="m-cur-meta" class="font-mono text-sky-300 truncate">No.1 / 行1 / JAN: -</span>
-                <span id="m-cur-price-amt" class="font-mono text-emerald-300 font-bold">¥0 × 0 = ¥0</span>
+                <div class="flex items-center gap-1.5 shrink-0">
+                    <span id="m-cur-prev-info" class="bg-slate-800 border border-slate-600 text-amber-300 px-1.5 py-0.5 rounded font-mono text-[10px]">先月:-</span>
+                    <button onclick="speakCurrentRecord(true)" class="bg-amber-500 text-slate-950 font-bold text-[10px] px-1.5 py-0.5 rounded">🗣️読上</button>
+                </div>
             </div>
-            <h1 id="m-cur-name" class="text-base font-bold text-white leading-tight truncate">
-                商品を選択またはスキャンしてください
-            </h1>
+            <div class="flex items-baseline justify-between gap-2">
+                <h1 id="m-cur-name" class="text-base font-bold text-white leading-tight truncate">商品を選択またはスキャンしてください</h1>
+                <span id="m-cur-price-amt" class="font-mono text-emerald-300 font-bold text-xs shrink-0">¥0</span>
+            </div>
 
-            <!-- 棚上 / 棚下 / 合計 の3枠（タップで入力先を切替） -->
+            <!-- 棚上 / 棚下 / 合計 の3枠 -->
             <div class="grid grid-cols-3 gap-1.5 mt-2">
                 <button id="box-qty-upper" onclick="setActiveField('upper')" class="text-left bg-blue-950 rounded-lg px-2 py-1 border-2 border-amber-400">
-                    <span class="text-[10px] text-amber-300 font-bold block">📦 棚上（入力中）</span>
+                    <span class="text-[10px] text-amber-300 font-bold block">📦 棚上</span>
                     <b id="m-val-upper" class="text-2xl font-mono text-white">-</b>
                 </button>
                 <button id="box-qty-lower" onclick="setActiveField('lower')" class="text-left bg-slate-800 rounded-lg px-2 py-1 border-2 border-slate-600">
@@ -136,16 +143,16 @@
                     <b id="m-val-lower" class="text-2xl font-mono text-white">-</b>
                 </button>
                 <div class="bg-slate-800 rounded-lg px-2 py-1 border border-slate-700 flex flex-col justify-between">
-                    <span class="text-[10px] text-slate-400 block">合計数</span>
+                    <span class="text-[10px] text-slate-400 block">今回合計</span>
                     <b id="m-val-total" class="text-2xl font-mono text-emerald-400">0</b>
                 </div>
             </div>
         </div>
 
-        <!-- ③ 大型テンキー＆確定ボタン（当日カウントモード時のみ表示） -->
+        <!-- ③ 大型テンキー＆確定ボタン -->
         <div id="keypad-area" class="bg-white rounded-xl p-2 shadow-sm border border-slate-200 flex flex-col gap-1.5">
             <div class="grid grid-cols-4 gap-1 text-xs font-bold">
-                <button onclick="setZeroAndNext()" class="tap-btn bg-slate-100 text-slate-700 border border-slate-300 py-1.5 rounded-lg">0個で確定</button>
+                <button onclick="copyPrevMonthQty()" class="tap-btn bg-amber-100 text-amber-900 border border-amber-300 py-1.5 rounded-lg">先月同数</button>
                 <button onclick="adjustQty(1)" class="tap-btn bg-slate-100 text-slate-800 border border-slate-300 py-1.5 rounded-lg">+1</button>
                 <button onclick="adjustQty(5)" class="tap-btn bg-slate-100 text-slate-800 border border-slate-300 py-1.5 rounded-lg">+5</button>
                 <button onclick="adjustQty(10)" class="tap-btn bg-slate-100 text-slate-800 border border-slate-300 py-1.5 rounded-lg">+10</button>
@@ -170,16 +177,12 @@
             </div>
 
             <div class="grid grid-cols-12 gap-1.5 pt-0.5">
-                <button onclick="movePrevRecord()" class="col-span-4 tap-btn bg-slate-600 text-white py-2.5 rounded-xl font-bold text-xs">
-                    ◀ 前へ
-                </button>
-                <button onclick="confirmAndNextRecord()" class="col-span-8 tap-btn bg-blue-600 active:bg-blue-700 text-white py-2.5 rounded-xl font-bold text-sm shadow">
-                    ✅ 確定して次へ ▶
-                </button>
+                <button onclick="movePrevRecord()" class="col-span-4 tap-btn bg-slate-600 text-white py-2.5 rounded-xl font-bold text-xs">◀ 前へ</button>
+                <button onclick="confirmAndNextRecord()" class="col-span-8 tap-btn bg-blue-600 active:bg-blue-700 text-white py-2.5 rounded-xl font-bold text-sm shadow">✅ 確定して次へ ▶</button>
             </div>
         </div>
 
-        <!-- ④ 用紙No.内の商品リスト（未入力絞り込み・別行追加対応） -->
+        <!-- ④ 用紙No.内の商品リスト -->
         <div class="bg-white rounded-xl p-2.5 shadow-sm border border-slate-200 space-y-2 text-xs">
             <div class="flex items-center justify-between border-b border-slate-200 pb-1.5">
                 <span class="font-bold text-slate-700">📋 この用紙のリスト（最大40行）</span>
@@ -199,10 +202,11 @@
         <div class="bg-slate-900 text-white p-4 rounded-2xl shadow flex flex-wrap items-center justify-between gap-3">
             <div>
                 <span class="bg-amber-400 text-slate-950 font-extrabold text-xs px-2 py-0.5 rounded">管理者専用 PCモード</span>
-                <h2 class="text-lg font-bold mt-1">道の駅おけがわ 棚卸集計・マスタ投げ込み・Excel貼付出力</h2>
+                <h2 class="text-lg font-bold mt-1">道の駅おけがわ 棚卸集計・Excel投げ込み・貼付出力</h2>
             </div>
             <div class="flex flex-wrap gap-2">
                 <button onclick="fetchAllFromGasApi(true)" class="bg-sky-600 text-white font-bold text-xs px-3 py-2 rounded-xl">🔄 最新同期</button>
+                <button onclick="openManualAddProductModal()" class="bg-amber-500 text-slate-950 font-bold text-xs px-3 py-2 rounded-xl">＋ 商品手入力追加</button>
                 <button onclick="openBackupModal()" class="bg-emerald-600 text-white font-bold text-xs px-3 py-2 rounded-xl">💾 バックアップ</button>
                 <button onclick="switchToMobileView()" class="bg-slate-700 text-white font-bold text-xs px-3 py-2 rounded-xl">📱 スマホ画面へ戻る</button>
             </div>
@@ -234,7 +238,7 @@
                 📊 ① Excel貼り付け出力（用紙No.別）
             </button>
             <button onclick="switchAdminTab('tab-import')" id="btn-tab-import" class="bg-white text-slate-700 border border-slate-300 font-bold text-xs px-4 py-2 rounded-xl">
-                📥 ② 商品台帳Excel 投げ込み登録
+                📥 ② Excel投げ込み（商品台帳 ＋ 先月棚卸し表）
             </button>
             <button onclick="switchAdminTab('tab-settings')" id="btn-tab-settings" class="bg-white text-slate-700 border border-slate-300 font-bold text-xs px-4 py-2 rounded-xl">
                 👥 ③ 担当者(15名)・PIN設定
@@ -260,18 +264,15 @@
                     </button>
                 </div>
             </div>
-            <p class="text-xs text-slate-600">
-                ※Excelの数式（B〜I列）を壊さないよう、<b>①「A列をコピー」→ Excelの該当用紙のA列先頭セルへ貼付</b>、次に <b>②「J・K列をコピー」→ ExcelのJ列先頭セルへ貼付</b> してください。
-            </p>
             <div class="overflow-x-auto">
                 <table class="w-full text-xs text-left border-collapse">
                     <thead>
                         <tr class="bg-slate-100 text-slate-600 border-b border-slate-300">
                             <th class="p-2">行</th>
                             <th class="p-2">JANコード (A列)</th>
-                            <th class="p-2">中分類 / 小分類</th>
                             <th class="p-2">商品名</th>
                             <th class="p-2 text-right">上代税抜</th>
+                            <th class="p-2 text-right text-amber-700">先月(上/下)</th>
                             <th class="p-2 text-right bg-blue-50">棚上 (J列)</th>
                             <th class="p-2 text-right bg-blue-50">棚下 (K列)</th>
                             <th class="p-2 text-right font-bold">合計</th>
@@ -285,18 +286,25 @@
             </div>
         </section>
 
-        <!-- タブ②：商品台帳Excel 投げ込み登録 -->
+        <!-- タブ②：Excel投げ込み登録（商品台帳 ＋ 先月棚卸し表） -->
         <section id="tab-import" class="hidden bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-4">
-            <h3 class="font-bold text-base text-slate-800">📥 商品台帳Excel（.xlsx）ドラッグ＆ドロップ登録</h3>
-            <p class="text-xs text-slate-600">
-                「棚卸表 道の駅おけがわ物販〜.xlsx」をそのまま下に投げ込むと、<b>「商品台帳」シート</b>からJAN・商品名・売価・分類を自動抽出し、全スマホで高速検索できるように登録します。
-            </p>
+            <h3 class="font-bold text-base text-slate-800">📥 棚卸表Excel（.xlsx）ドラッグ＆ドロップ一括取込</h3>
+            <div class="bg-slate-50 border border-slate-200 p-3 rounded-xl space-y-2 text-xs">
+                <label class="flex items-center gap-2 font-bold text-slate-800 cursor-pointer">
+                    <input type="checkbox" id="chk-import-products" checked class="w-4 h-4">
+                    ①「商品台帳」シートを取り込む（JAN・商品名・売価・分類の約2.1万件）
+                </label>
+                <label class="flex items-center gap-2 font-bold text-blue-900 cursor-pointer">
+                    <input type="checkbox" id="chk-import-lastmonth" checked class="w-4 h-4">
+                    ②「棚卸し表」シート（先月分）を取り込む（用紙No.ごとの商品リスト＋先月数を自動セット、今月数は空欄）
+                </label>
+            </div>
             <div id="drop-zone" class="border-2 border-dashed border-blue-400 bg-blue-50 rounded-2xl p-8 text-center cursor-pointer hover:bg-blue-100 transition">
                 <p class="text-sm font-bold text-blue-900">📂 ここにExcelファイル（.xlsx）をドラッグ＆ドロップ</p>
                 <p class="text-xs text-blue-700 mt-1">またはクリックしてファイルを選択</p>
                 <input type="file" id="excel-file-input" accept=".xlsx,.xls" class="hidden" onchange="handleExcelDropFile(this.files[0])">
             </div>
-            <div id="import-status-box" class="hidden bg-slate-900 text-emerald-300 font-mono text-xs p-3 rounded-xl"></div>
+            <div id="import-status-box" class="hidden bg-slate-900 text-emerald-300 font-mono text-xs p-3 rounded-xl whitespace-pre-wrap"></div>
             <div class="flex gap-2">
                 <button onclick="downloadProductsFromGas()" class="bg-sky-600 text-white font-bold text-xs px-4 py-2 rounded-xl">
                     ☁️ スプレッドシートから最新マスタをこの端末へ同期
@@ -335,7 +343,7 @@
     <!-- トースト通知 -->
     <div id="toast-box" class="fixed bottom-3 right-3 left-3 sm:left-auto bg-slate-900 text-white border-l-4 border-amber-400 px-3.5 py-2.5 rounded-xl shadow-xl text-xs font-bold hidden z-50"></div>
 
-    <script src="app-core.js"></script>
-    <script src="app-ui.js"></script>
+    <script src="app-core.js?v=9"></script>
+    <script src="app-ui.js?v=9"></script>
 </body>
 </html>
