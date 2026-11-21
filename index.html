@@ -3,10 +3,16 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>道の駅おけがわ 棚卸アプリ</title>
+    <title>道の駅おけがわ 棚卸アプリ v10</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@ericblade/quagga2@1.8.4/dist/quagga.min.js"></script>
+    <!-- 高精度全方向バーコード読取 ZXing-JS -->
+    <script src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"></script>
+    <!-- Excel高速読込 SheetJS -->
     <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <!-- 元Excelの数式・書式を保持したまま書き出す ExcelJS -->
+    <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
+    <!-- 2次元バーコード(QRコード)生成 QRCode.js -->
+    <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif;
@@ -27,7 +33,7 @@
             50% { top: 80%; }
         }
         .laser-line {
-            position: absolute; left: 14%; right: 14%; height: 2px;
+            position: absolute; left: 12%; right: 12%; height: 2px;
             background: #10b981; box-shadow: 0 0 8px #10b981;
             animation: laserScan 1.3s infinite ease-in-out; pointer-events: none;
         }
@@ -39,13 +45,14 @@
     <header class="bg-slate-900 text-white px-2 py-1.5 flex items-center justify-between gap-1 sticky top-0 z-30 shadow">
         <div class="flex items-center gap-1 min-w-0">
             <span id="sync-status-dot" class="w-2.5 h-2.5 rounded-full bg-slate-500 shrink-0" title="同期状態"></span>
-            <select id="worker-select" onchange="onWorkerChange(this.value)" class="bg-slate-800 border border-slate-600 text-amber-300 font-bold text-xs rounded px-1 py-1 outline-none max-w-[95px]"></select>
+            <span id="offline-queue-badge" onclick="flushOfflineQueue(true)" class="hidden bg-rose-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded cursor-pointer shrink-0">未送信:0</span>
+            <select id="worker-select" onchange="onWorkerChange(this.value)" class="bg-slate-800 border border-slate-600 text-amber-300 font-bold text-xs rounded px-1 py-1 outline-none max-w-[92px]"></select>
             <button onclick="openGasUrlModal()" class="bg-slate-800 border border-slate-600 text-[11px] px-1.5 py-1 rounded shrink-0">⚙️接続</button>
         </div>
 
         <div class="flex items-center gap-1 shrink-0">
             <button onclick="fetchAllFromGasApi(true)" class="bg-sky-700 text-white font-bold text-[11px] px-1.5 py-1 rounded">🔄同期</button>
-            <button id="btn-tts" onclick="toggleTts()" class="bg-amber-600 text-white font-bold text-[11px] px-1.5 py-1 rounded">🗣️声:ON</button>
+            <button id="btn-tts" onclick="toggleTts()" class="bg-amber-600 text-white font-bold text-[11px] px-1.5 py-1 rounded">🗣️声</button>
             <button id="btn-sound" onclick="toggleSound()" class="bg-slate-800 border border-slate-700 text-[11px] px-1.5 py-1 rounded">🔊音</button>
             <button onclick="openBackupModal()" class="bg-emerald-700 text-white font-bold text-[11px] px-1.5 py-1 rounded">💾保存</button>
             <button id="btn-mode-switch" onclick="requestAdminView()" class="bg-slate-700 border border-slate-500 text-white font-bold text-[11px] px-1.5 py-1 rounded">🔒管理</button>
@@ -57,23 +64,29 @@
     <!-- ========================================================== -->
     <main id="mobile-view" class="flex-1 max-w-md w-full mx-auto p-2 flex flex-col gap-1.5">
 
-        <!-- ① 用紙No.選択・区画編集・マスタ件数 -->
+        <!-- ① 用紙No.・進捗マップ・モード・入力ロック -->
         <div class="bg-white rounded-xl p-2 shadow-sm border border-slate-200 flex flex-col gap-1.5">
             <div class="flex items-center gap-1">
                 <select id="m-sheet-no" onchange="onSheetNoChange(this.value)" class="flex-1 min-w-0 bg-slate-100 border border-slate-300 rounded-lg px-2 py-1.5 font-extrabold text-sm text-slate-900"></select>
-                <button onclick="openEditSheetNameModal()" class="bg-slate-200 text-slate-700 text-[11px] font-bold px-2 py-1.5 rounded-lg shrink-0" title="用紙の区画名を設定">✏️区画</button>
-                <span id="m-sheet-count-badge" class="bg-slate-800 text-white text-[11px] font-bold px-2 py-1.5 rounded-lg shrink-0">0/40</span>
-                <span id="m-uncounted-badge" class="bg-rose-600 text-white text-[11px] font-bold px-2 py-1.5 rounded-lg shrink-0">未0</span>
+                <button onclick="openSheetProgressMapModal()" class="bg-indigo-600 text-white text-[11px] font-bold px-2 py-1.5 rounded-lg shrink-0">🗺️マップ</button>
+                <button onclick="openEditSheetNameModal()" class="bg-slate-200 text-slate-700 text-[11px] font-bold px-1.5 py-1.5 rounded-lg shrink-0">✏️</button>
+                <span id="m-sheet-count-badge" class="bg-slate-800 text-white text-[11px] font-bold px-1.5 py-1.5 rounded-lg shrink-0">0/40</span>
+                <span id="m-uncounted-badge" class="bg-rose-600 text-white text-[11px] font-bold px-1.5 py-1.5 rounded-lg shrink-0">未0</span>
             </div>
 
-            <!-- 作業モード切替 ＋ マスタ件数ステータス -->
+            <!-- 作業モード切替 ＋ 棚上/棚下入力ロック（機能③） -->
             <div class="flex items-center justify-between gap-1">
-                <div class="flex-1 grid grid-cols-2 gap-1 bg-slate-100 p-0.5 rounded-lg text-[11px] font-bold">
-                    <button id="mode-btn-count" onclick="setWorkMode('count')" class="py-1 rounded-md bg-blue-600 text-white shadow">🔢 当日カウント</button>
-                    <button id="mode-btn-pickup" onclick="setWorkMode('pickup')" class="py-1 rounded-md text-slate-600">📋 前日ピックアップ</button>
+                <div class="flex-1 grid grid-cols-2 gap-0.5 bg-slate-100 p-0.5 rounded-lg text-[11px] font-bold">
+                    <button id="mode-btn-count" onclick="setWorkMode('count')" class="py-1 rounded-md bg-blue-600 text-white shadow">🔢 当日</button>
+                    <button id="mode-btn-pickup" onclick="setWorkMode('pickup')" class="py-1 rounded-md text-slate-600">📋 ピックアップ</button>
                 </div>
-                <button onclick="downloadProductsFromGas()" id="m-master-badge" class="bg-indigo-50 border border-indigo-200 text-indigo-800 text-[10px] font-bold px-2 py-1.5 rounded-lg shrink-0">
-                    台帳:0件
+                <select id="m-field-lock" onchange="onFieldLockChange(this.value)" class="bg-amber-50 border border-amber-300 text-amber-900 text-[11px] font-bold rounded-lg px-1.5 py-1 shrink-0">
+                    <option value="both">🔓 上下両方</option>
+                    <option value="lower">🔒 棚下専用</option>
+                    <option value="upper">🔒 棚上専用</option>
+                </select>
+                <button onclick="downloadProductsFromGas()" id="m-master-badge" class="bg-indigo-50 border border-indigo-200 text-indigo-800 text-[10px] font-bold px-1.5 py-1.5 rounded-lg shrink-0">
+                    台帳:0
                 </button>
             </div>
 
@@ -97,32 +110,25 @@
                 🎤 <span id="voice-transcript">聞き取り待機中...</span>
             </div>
 
-            <!-- カメラプレビュー枠（縦横全方向対応） -->
-            <canvas id="decode-canvas" class="hidden"></canvas>
-            <div id="camera-wrapper" class="hidden relative w-full h-44 bg-black rounded-lg overflow-hidden border border-slate-700">
-                <canvas id="preview-canvas" class="w-full h-full block"></canvas>
+            <!-- カメラプレビュー枠（AppSheet並み全方向スキャン：BarcodeDetector + ZXing-JS） -->
+            <div id="camera-wrapper" class="hidden relative w-full h-48 bg-black rounded-lg overflow-hidden border border-slate-700">
+                <video id="scanner-video" class="w-full h-full object-cover" playsinline muted autoplay></video>
                 <div id="scan-overlay" class="absolute inset-0 pointer-events-none">
-                    <!-- 縦横どちらでも入る正方形ガイド枠 -->
-                    <div class="absolute inset-x-[15%] inset-y-[10%] border-2 border-emerald-400 rounded-lg shadow-[0_0_0_9999px_rgba(0,0,0,0.45)]"></div>
+                    <div class="absolute inset-x-[12%] inset-y-[12%] border-2 border-emerald-400 rounded-lg shadow-[0_0_0_9999px_rgba(0,0,0,0.45)]"></div>
                     <div class="laser-line"></div>
-                    <span id="scan-debug-info" class="absolute top-1.5 left-1.5 bg-black/75 text-amber-300 text-[10px] font-mono px-1.5 py-0.5 rounded">解析中</span>
-                    <span id="scan-mode-hint" class="absolute bottom-1 left-1/2 -translate-x-1/2 bg-black/80 text-emerald-300 text-[10px] px-2 py-0.5 rounded-full whitespace-nowrap">
-                        縦・横どちらのバーコードでも読めます
+                    <span id="scan-engine-badge" class="absolute top-1.5 left-1.5 bg-black/75 text-amber-300 text-[10px] font-mono px-1.5 py-0.5 rounded">高精度スキャン中</span>
+                    <span class="absolute bottom-1 left-1/2 -translate-x-1/2 bg-black/80 text-emerald-300 text-[10px] px-2 py-0.5 rounded-full whitespace-nowrap">
+                        縦・横・斜め どの向きでも瞬時に読めます
                     </span>
-                </div>
-                <div class="absolute top-1.5 right-1.5 flex gap-1 z-10">
-                    <button onclick="setDigitalZoom(1.0)" id="z-btn-10" class="bg-slate-900/80 text-white text-[10px] font-bold px-1.5 py-0.5 rounded">1.0x</button>
-                    <button onclick="setDigitalZoom(1.6)" id="z-btn-16" class="bg-emerald-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded">1.6x</button>
-                    <button onclick="setDigitalZoom(2.2)" id="z-btn-22" class="bg-slate-900/80 text-white text-[10px] font-bold px-1.5 py-0.5 rounded">2.2x</button>
                 </div>
             </div>
         </div>
 
-        <!-- ② 現在選択中の商品カード（棚上・棚下・合計・先月実績・読上） -->
+        <!-- ② 現在選択中の商品カード（棚上・棚下・合計・先月・追加発見・やり直し・削除） -->
         <div id="count-card-area" class="bg-slate-900 text-white rounded-xl p-2.5 shadow border border-slate-700">
             <div class="flex items-center justify-between text-[11px] text-slate-300 mb-0.5 gap-1">
                 <span id="m-cur-meta" class="font-mono text-sky-300 truncate">No.1 / 行1 / JAN: -</span>
-                <div class="flex items-center gap-1.5 shrink-0">
+                <div class="flex items-center gap-1 shrink-0">
                     <span id="m-cur-prev-info" class="bg-slate-800 border border-slate-600 text-amber-300 px-1.5 py-0.5 rounded font-mono text-[10px]">先月:-</span>
                     <button onclick="speakCurrentRecord(true)" class="bg-amber-500 text-slate-950 font-bold text-[10px] px-1.5 py-0.5 rounded">🗣️読上</button>
                 </div>
@@ -146,6 +152,14 @@
                     <span class="text-[10px] text-slate-400 block">今回合計</span>
                     <b id="m-val-total" class="text-2xl font-mono text-emerald-400">0</b>
                 </div>
+            </div>
+
+            <!-- アクション小バー：追加発見 / やり直し / 削除 / 備考 -->
+            <div class="grid grid-cols-4 gap-1 mt-2 text-[11px] font-bold">
+                <button onclick="openAddFoundStockModal()" class="tap-btn bg-amber-500 text-slate-950 py-1 rounded-lg">➕追加発見</button>
+                <button onclick="openMemoModal()" id="btn-memo-badge" class="tap-btn bg-slate-700 text-white py-1 rounded-lg truncate">📝備考</button>
+                <button onclick="resetCurrentRecord()" class="tap-btn bg-slate-700 text-amber-300 py-1 rounded-lg">🔄やり直し</button>
+                <button onclick="deleteCurrentRecord()" class="tap-btn bg-rose-700 text-white py-1 rounded-lg">🗑️削除</button>
             </div>
         </div>
 
@@ -201,84 +215,98 @@
 
         <div class="bg-slate-900 text-white p-4 rounded-2xl shadow flex flex-wrap items-center justify-between gap-3">
             <div>
-                <span class="bg-amber-400 text-slate-950 font-extrabold text-xs px-2 py-0.5 rounded">管理者専用 PCモード</span>
-                <h2 class="text-lg font-bold mt-1">道の駅おけがわ 棚卸集計・Excel投げ込み・貼付出力</h2>
+                <span class="bg-amber-400 text-slate-950 font-extrabold text-xs px-2 py-0.5 rounded">管理者専用 PCモード v10</span>
+                <h2 class="text-lg font-bold mt-1">道の駅おけがわ 棚卸集計・進捗マップ・Excel自動生成</h2>
             </div>
             <div class="flex flex-wrap gap-2">
                 <button onclick="fetchAllFromGasApi(true)" class="bg-sky-600 text-white font-bold text-xs px-3 py-2 rounded-xl">🔄 最新同期</button>
-                <button onclick="openManualAddProductModal()" class="bg-amber-500 text-slate-950 font-bold text-xs px-3 py-2 rounded-xl">＋ 商品手入力追加</button>
+                <button onclick="openGasUrlModal()" class="bg-indigo-600 text-white font-bold text-xs px-3 py-2 rounded-xl">📱 配布QRコード</button>
+                <button onclick="openManualAddProductModal()" class="bg-amber-500 text-slate-950 font-bold text-xs px-3 py-2 rounded-xl">＋ 商品手入力</button>
                 <button onclick="openBackupModal()" class="bg-emerald-600 text-white font-bold text-xs px-3 py-2 rounded-xl">💾 バックアップ</button>
                 <button onclick="switchToMobileView()" class="bg-slate-700 text-white font-bold text-xs px-3 py-2 rounded-xl">📱 スマホ画面へ戻る</button>
             </div>
         </div>
 
-        <!-- KPIカード -->
-        <section class="grid grid-cols-2 lg:grid-cols-4 gap-3">
-            <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
-                <span class="text-xs text-slate-500 font-bold">登録行数 / 未入力</span>
-                <div class="text-2xl font-extrabold text-slate-900 mt-1" id="pc-kpi-rows">0行 (未0)</div>
-            </div>
-            <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
-                <span class="text-xs text-slate-500 font-bold">棚卸 合計金額（税抜）</span>
+        <!-- 機能⑤：部門別リアルタイム集計速報 ＆ KPI -->
+        <section class="grid grid-cols-2 lg:grid-cols-5 gap-3">
+            <div class="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-sm">
+                <span class="text-xs text-slate-500 font-bold">総合計金額（税抜）</span>
                 <div class="text-2xl font-extrabold text-emerald-700 mt-1 font-mono" id="pc-kpi-amount">¥0</div>
+                <div class="text-[11px] text-slate-500 mt-0.5" id="pc-kpi-prev-amount">先月計: ¥0</div>
             </div>
-            <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
-                <span class="text-xs text-slate-500 font-bold">商品台帳マスタ件数</span>
-                <div class="text-2xl font-extrabold text-blue-700 mt-1" id="pc-kpi-master-count">0 件</div>
+            <div class="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-sm">
+                <span class="text-xs text-slate-500 font-bold">一般合計（税抜）</span>
+                <div class="text-xl font-extrabold text-blue-700 mt-1 font-mono" id="pc-kpi-general">¥0</div>
             </div>
-            <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
-                <span class="text-xs text-slate-500 font-bold">使用中の用紙No.</span>
-                <div class="text-2xl font-extrabold text-indigo-700 mt-1" id="pc-kpi-sheets">0 枚</div>
+            <div class="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-sm">
+                <span class="text-xs text-slate-500 font-bold">酒 合計（税抜）</span>
+                <div class="text-xl font-extrabold text-purple-700 mt-1 font-mono" id="pc-kpi-sake">¥0</div>
+            </div>
+            <div class="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-sm">
+                <span class="text-xs text-slate-500 font-bold">進捗 / 異常値・備考</span>
+                <div class="text-lg font-extrabold text-slate-900 mt-1" id="pc-kpi-rows">0行 (未0)</div>
+                <div class="text-[11px] text-rose-600 font-bold mt-0.5" id="pc-kpi-alerts">異常:0 / 備考:0</div>
+            </div>
+            <div class="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-sm">
+                <span class="text-xs text-slate-500 font-bold">台帳マスタ / 使用用紙</span>
+                <div class="text-lg font-extrabold text-indigo-700 mt-1" id="pc-kpi-master-count">0 件</div>
+                <div class="text-[11px] text-slate-500 mt-0.5" id="pc-kpi-sheets">使用中: 0 枚</div>
             </div>
         </section>
 
-        <!-- タブ -->
+        <!-- 管理タブ -->
         <div class="flex flex-wrap gap-2 border-b border-slate-300 pb-2">
-            <button onclick="switchAdminTab('tab-excel')" id="btn-tab-excel" class="bg-blue-600 text-white font-bold text-xs px-4 py-2 rounded-xl">
-                📊 ① Excel貼り付け出力（用紙No.別）
+            <button onclick="switchAdminTab('tab-excel')" id="btn-tab-excel" class="bg-blue-600 text-white font-bold text-xs px-3.5 py-2 rounded-xl">
+                📊 ① 明細・異常値チェック・Excel出力
             </button>
-            <button onclick="switchAdminTab('tab-import')" id="btn-tab-import" class="bg-white text-slate-700 border border-slate-300 font-bold text-xs px-4 py-2 rounded-xl">
-                📥 ② Excel投げ込み（商品台帳 ＋ 先月棚卸し表）
+            <button onclick="switchAdminTab('tab-map')" id="btn-tab-map" class="bg-white text-slate-700 border border-slate-300 font-bold text-xs px-3.5 py-2 rounded-xl">
+                🗺️ ② 用紙No.進捗マップ
             </button>
-            <button onclick="switchAdminTab('tab-settings')" id="btn-tab-settings" class="bg-white text-slate-700 border border-slate-300 font-bold text-xs px-4 py-2 rounded-xl">
-                👥 ③ 担当者(15名)・PIN設定
+            <button onclick="switchAdminTab('tab-import')" id="btn-tab-import" class="bg-white text-slate-700 border border-slate-300 font-bold text-xs px-3.5 py-2 rounded-xl">
+                📥 ③ Excel投げ込み ＆ 完成版Excel自動生成
+            </button>
+            <button onclick="switchAdminTab('tab-logs')" id="btn-tab-logs" class="bg-white text-slate-700 border border-slate-300 font-bold text-xs px-3.5 py-2 rounded-xl">
+                ➕ ④ 追加発見履歴
+            </button>
+            <button onclick="switchAdminTab('tab-settings')" id="btn-tab-settings" class="bg-white text-slate-700 border border-slate-300 font-bold text-xs px-3.5 py-2 rounded-xl">
+                ⚙️ ⑤ 異常値設定・担当者・読み上げ辞書・PIN
             </button>
         </div>
 
-        <!-- タブ①：Excel貼り付け出力 -->
+        <!-- タブ①：明細・異常値・Excel貼り付け出力 -->
         <section id="tab-excel" class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-3">
             <div class="flex flex-wrap items-center justify-between gap-2 bg-amber-50 border border-amber-200 p-3 rounded-xl">
-                <div class="flex items-center gap-2">
-                    <label class="font-bold text-xs text-slate-700">出力する用紙No.:</label>
-                    <select id="pc-export-sheet-no" onchange="renderAdminExportTable()" class="border border-slate-300 rounded-lg px-3 py-1.5 font-bold text-sm bg-white"></select>
+                <div class="flex flex-wrap items-center gap-2">
+                    <select id="pc-export-sheet-no" onchange="renderAdminExportTable()" class="border border-slate-300 rounded-lg px-2.5 py-1.5 font-bold text-xs bg-white"></select>
+                    <select id="pc-filter-mode" onchange="renderAdminExportTable()" class="border border-slate-300 rounded-lg px-2.5 py-1.5 font-bold text-xs bg-white">
+                        <option value="sheet">選択中の用紙No.を表示</option>
+                        <option value="anomaly">⚠️ 全用紙から「異常値・差異」のみ抽出</option>
+                        <option value="memo">📝 全用紙から「備考あり」のみ抽出</option>
+                        <option value="uncounted">🔴 全用紙から「未入力」のみ抽出</option>
+                    </select>
                 </div>
-                <div class="flex flex-wrap gap-2">
-                    <button onclick="copyExcelColumnA()" class="bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs px-3.5 py-2 rounded-xl shadow">
-                        📋 ① A列（JANコード）をコピー
-                    </button>
-                    <button onclick="copyExcelColumnJK()" class="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-3.5 py-2 rounded-xl shadow">
-                        📋 ② J・K列（棚上・棚下）をコピー
-                    </button>
-                    <button onclick="downloadAllCsv()" class="bg-slate-800 text-white font-bold text-xs px-3.5 py-2 rounded-xl">
-                        ⬇️ 全データCSV出力
-                    </button>
+                <div class="flex flex-wrap gap-1.5">
+                    <button onclick="copyExcelColumnA()" class="bg-blue-600 text-white font-bold text-xs px-3 py-2 rounded-xl">📋 ① A列(JAN)コピー</button>
+                    <button onclick="copyExcelColumnJK()" class="bg-emerald-600 text-white font-bold text-xs px-3 py-2 rounded-xl">📋 ② J・K列(棚上/下)コピー</button>
+                    <button onclick="downloadAllCsv()" class="bg-slate-800 text-white font-bold text-xs px-3 py-2 rounded-xl">⬇️ 全CSV出力</button>
                 </div>
             </div>
             <div class="overflow-x-auto">
                 <table class="w-full text-xs text-left border-collapse">
                     <thead>
                         <tr class="bg-slate-100 text-slate-600 border-b border-slate-300">
-                            <th class="p-2">行</th>
-                            <th class="p-2">JANコード (A列)</th>
+                            <th class="p-2">用紙/行</th>
+                            <th class="p-2">JANコード</th>
                             <th class="p-2">商品名</th>
-                            <th class="p-2 text-right">上代税抜</th>
+                            <th class="p-2 text-right">上代</th>
                             <th class="p-2 text-right text-amber-700">先月(上/下)</th>
-                            <th class="p-2 text-right bg-blue-50">棚上 (J列)</th>
-                            <th class="p-2 text-right bg-blue-50">棚下 (K列)</th>
+                            <th class="p-2 text-right bg-blue-50">棚上</th>
+                            <th class="p-2 text-right bg-blue-50">棚下</th>
                             <th class="p-2 text-right font-bold">合計</th>
                             <th class="p-2 text-right">金額</th>
-                            <th class="p-2">担当 / 状態</th>
-                            <th class="p-2 text-center">削除</th>
+                            <th class="p-2">備考・警告</th>
+                            <th class="p-2">担当</th>
+                            <th class="p-2 text-center">操作</th>
                         </tr>
                     </thead>
                     <tbody id="pc-export-tbody" class="divide-y divide-slate-200"></tbody>
@@ -286,45 +314,127 @@
             </div>
         </section>
 
-        <!-- タブ②：Excel投げ込み登録（商品台帳 ＋ 先月棚卸し表） -->
-        <section id="tab-import" class="hidden bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-4">
-            <h3 class="font-bold text-base text-slate-800">📥 棚卸表Excel（.xlsx）ドラッグ＆ドロップ一括取込</h3>
-            <div class="bg-slate-50 border border-slate-200 p-3 rounded-xl space-y-2 text-xs">
-                <label class="flex items-center gap-2 font-bold text-slate-800 cursor-pointer">
-                    <input type="checkbox" id="chk-import-products" checked class="w-4 h-4">
-                    ①「商品台帳」シートを取り込む（JAN・商品名・売価・分類の約2.1万件）
-                </label>
-                <label class="flex items-center gap-2 font-bold text-blue-900 cursor-pointer">
-                    <input type="checkbox" id="chk-import-lastmonth" checked class="w-4 h-4">
-                    ②「棚卸し表」シート（先月分）を取り込む（用紙No.ごとの商品リスト＋先月数を自動セット、今月数は空欄）
-                </label>
+        <!-- タブ②：機能① 用紙No.進捗マップ -->
+        <section id="tab-map" class="hidden bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-3">
+            <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
+                <h3 class="font-bold text-sm">🗺️ 用紙 No.1〜200 リアルタイム進捗マップ（クリックで明細へ移動）</h3>
+                <div class="flex flex-wrap gap-2">
+                    <span class="px-2 py-0.5 rounded bg-slate-100 border">白：未登録/未着手</span>
+                    <span class="px-2 py-0.5 rounded bg-amber-100 border border-amber-400">黄：作業中</span>
+                    <span class="px-2 py-0.5 rounded bg-emerald-100 border border-emerald-500">緑：全行完了</span>
+                    <span class="px-2 py-0.5 rounded border-2 border-rose-500">赤枠：備考あり</span>
+                </div>
             </div>
-            <div id="drop-zone" class="border-2 border-dashed border-blue-400 bg-blue-50 rounded-2xl p-8 text-center cursor-pointer hover:bg-blue-100 transition">
-                <p class="text-sm font-bold text-blue-900">📂 ここにExcelファイル（.xlsx）をドラッグ＆ドロップ</p>
-                <p class="text-xs text-blue-700 mt-1">またはクリックしてファイルを選択</p>
-                <input type="file" id="excel-file-input" accept=".xlsx,.xls" class="hidden" onchange="handleExcelDropFile(this.files[0])">
+            <div id="pc-progress-map-grid" class="grid grid-cols-4 sm:grid-cols-8 lg:grid-cols-10 gap-1.5"></div>
+        </section>
+
+        <!-- タブ③：Excel投げ込み ＆ 完成版Excel自動生成 -->
+        <section id="tab-import" class="hidden grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <!-- 左：Excel読込 -->
+            <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-3">
+                <h3 class="font-bold text-base text-slate-800">📥 1. Excel投げ込み（商品台帳 ＋ 先月棚卸し表）</h3>
+                <div class="bg-slate-50 border border-slate-200 p-3 rounded-xl space-y-2 text-xs">
+                    <label class="flex items-center gap-2 font-bold cursor-pointer">
+                        <input type="checkbox" id="chk-import-products" checked class="w-4 h-4">
+                        ①「商品台帳」シートを取り込む（約2.1万件）
+                    </label>
+                    <label class="flex items-center gap-2 font-bold text-blue-900 cursor-pointer">
+                        <input type="checkbox" id="chk-import-lastmonth" checked class="w-4 h-4">
+                        ②「棚卸し表」シート（先月分）を取り込む（今月数は空欄でセット）
+                    </label>
+                </div>
+                <div id="drop-zone" class="border-2 border-dashed border-blue-400 bg-blue-50 rounded-2xl p-6 text-center cursor-pointer hover:bg-blue-100">
+                    <p class="text-sm font-bold text-blue-900">📂 ここに元Excel（.xlsx）をドラッグ＆ドロップ</p>
+                    <p class="text-xs text-blue-700 mt-1">またはクリックして選択</p>
+                    <input type="file" id="excel-file-input" accept=".xlsx,.xls" class="hidden" onchange="handleExcelDropFile(this.files[0])">
+                </div>
+                <div id="import-status-box" class="hidden bg-slate-900 text-emerald-300 font-mono text-xs p-3 rounded-xl whitespace-pre-wrap"></div>
             </div>
-            <div id="import-status-box" class="hidden bg-slate-900 text-emerald-300 font-mono text-xs p-3 rounded-xl whitespace-pre-wrap"></div>
-            <div class="flex gap-2">
-                <button onclick="downloadProductsFromGas()" class="bg-sky-600 text-white font-bold text-xs px-4 py-2 rounded-xl">
-                    ☁️ スプレッドシートから最新マスタをこの端末へ同期
-                </button>
+
+            <!-- 右：元Excelの数式を壊さず完成版Excelを自動生成 -->
+            <div class="bg-white p-5 rounded-2xl border border-emerald-300 shadow-sm space-y-3">
+                <h3 class="font-bold text-base text-emerald-900">📤 2. 提出用・完成版Excelの自動作成（数式・書式そのまま）</h3>
+                <p class="text-xs text-slate-600">
+                    元の棚卸表Excel（`棚卸表 道の駅おけがわ物販〜.xlsx`）を下に投げ込むと、<b>数式（VLOOKUP・集計シート）や罫線を一切壊さず</b>、全用紙No.のA列（JAN）・J列（棚上）・K列（棚下）へアプリの最新データを流し込んだ完成版Excelを即ダウンロードします。
+                </p>
+                <div id="export-drop-zone" class="border-2 border-dashed border-emerald-500 bg-emerald-50 rounded-2xl p-6 text-center cursor-pointer hover:bg-emerald-100">
+                    <p class="text-sm font-bold text-emerald-900">✨ 元Excelテンプレートをここにドロップして完成版を作成</p>
+                    <p class="text-xs text-emerald-700 mt-1">またはクリックして元Excelを選択</p>
+                    <input type="file" id="excel-template-input" accept=".xlsx" class="hidden" onchange="generateFilledExcelFromTemplate(this.files[0])">
+                </div>
+                <div id="export-status-box" class="hidden bg-slate-900 text-amber-300 font-mono text-xs p-3 rounded-xl whitespace-pre-wrap"></div>
             </div>
         </section>
 
-        <!-- タブ③：担当者・PIN設定 -->
-        <section id="tab-settings" class="hidden bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-4 max-w-xl">
-            <div>
-                <label class="font-bold text-xs text-slate-700 block mb-1">👥 作業担当者（カンマ区切り・最大15名）</label>
-                <textarea id="mst-workers-input" rows="3" class="w-full border rounded-lg p-2 text-xs"></textarea>
-                <button onclick="saveWorkersList()" class="mt-2 bg-blue-600 text-white font-bold text-xs px-4 py-2 rounded-lg">担当者リストを保存</button>
+        <!-- タブ④：追加発見履歴 -->
+        <section id="tab-logs" class="hidden bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-3">
+            <h3 class="font-bold text-sm text-amber-900">➕ 後から見つかった在庫の追加履歴ログ</h3>
+            <div class="overflow-x-auto">
+                <table class="w-full text-xs text-left border-collapse">
+                    <thead>
+                        <tr class="bg-amber-100 text-amber-950 border-b">
+                            <th class="p-2">日時</th>
+                            <th class="p-2">担当</th>
+                            <th class="p-2">用紙No.</th>
+                            <th class="p-2">商品名 / JAN</th>
+                            <th class="p-2">反映先</th>
+                            <th class="p-2 text-right">追加数</th>
+                            <th class="p-2">発見場所・メモ</th>
+                        </tr>
+                    </thead>
+                    <tbody id="pc-addlogs-tbody" class="divide-y divide-slate-200"></tbody>
+                </table>
             </div>
-            <div class="pt-3 border-t">
-                <label class="font-bold text-xs text-slate-700 block mb-1">🔒 PC管理画面の暗証番号（初期値: 1234）</label>
-                <div class="flex gap-2">
-                    <input id="mst-admin-pin" type="text" class="border rounded-lg px-3 py-1.5 text-xs font-mono">
-                    <button onclick="updateAdminPin()" class="bg-slate-800 text-white font-bold text-xs px-4 py-1.5 rounded-lg">PIN変更</button>
+        </section>
+
+        <!-- タブ⑤：機能②異常値設定・担当者・読み上げ辞書・PIN -->
+        <section id="tab-settings" class="hidden grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <!-- 異常値・差異アラート設定（機能②） -->
+            <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-3">
+                <h3 class="font-bold text-sm text-rose-700">⚠️ 異常値・桁違い・先月比差異アラート設定</h3>
+                <div class="grid grid-cols-2 gap-3 text-xs">
+                    <div>
+                        <label class="font-bold block mb-1">数量アラート（個以上）</label>
+                        <input id="set-alert-qty" type="number" class="w-full border rounded-lg p-2 font-mono">
+                    </div>
+                    <div>
+                        <label class="font-bold block mb-1">金額アラート（円以上）</label>
+                        <input id="set-alert-amt" type="number" class="w-full border rounded-lg p-2 font-mono">
+                    </div>
+                    <div>
+                        <label class="font-bold block mb-1">先月比の倍率警告（倍以上）</label>
+                        <input id="set-alert-ratio" type="number" step="0.1" class="w-full border rounded-lg p-2 font-mono">
+                    </div>
+                    <div class="flex items-end pb-1">
+                        <label class="flex items-center gap-1.5 font-bold cursor-pointer">
+                            <input id="set-alert-zero" type="checkbox" class="w-4 h-4">
+                            先月あり→今月0/未を警告
+                        </label>
+                    </div>
                 </div>
+                <button onclick="saveAlertSettings()" class="bg-rose-600 text-white font-bold text-xs px-4 py-2 rounded-xl">異常値設定を保存</button>
+
+                <div class="pt-4 border-t space-y-2">
+                    <label class="font-bold text-xs text-slate-700 block">👥 作業担当者（スプレッドシートの「担当者設定」シートA2:A16でも直接編集可能）</label>
+                    <textarea id="mst-workers-input" rows="2" class="w-full border rounded-lg p-2 text-xs"></textarea>
+                    <button onclick="saveWorkersList()" class="bg-blue-600 text-white font-bold text-xs px-4 py-2 rounded-lg">担当者リストを保存</button>
+                </div>
+
+                <div class="pt-3 border-t">
+                    <label class="font-bold text-xs text-slate-700 block mb-1">🔒 PC管理画面の暗証番号（初期値: 1234）</label>
+                    <div class="flex gap-2">
+                        <input id="mst-admin-pin" type="text" class="border rounded-lg px-3 py-1.5 text-xs font-mono">
+                        <button onclick="updateAdminPin()" class="bg-slate-800 text-white font-bold text-xs px-4 py-1.5 rounded-lg">PIN変更</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 読み上げ辞書編集 -->
+            <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-3">
+                <h3 class="font-bold text-sm text-indigo-800">🗣️ 音声読み上げ辞書（漢字の読み修正）</h3>
+                <p class="text-xs text-slate-600">1行に「<b>元の漢字,読み仮名</b>」と書いて保存すると、スプレッドシートの「読み上げ辞書」シートと同期されます。</p>
+                <textarea id="mst-dict-input" rows="9" class="w-full border rounded-lg p-2 font-mono text-xs bg-slate-50" placeholder="紅花,べにばな&#10;桶川,おけがわ"></textarea>
+                <button onclick="saveReadingDictFromUi()" class="bg-indigo-600 text-white font-bold text-xs px-4 py-2 rounded-xl">読み上げ辞書を保存</button>
             </div>
         </section>
     </main>
@@ -343,7 +453,7 @@
     <!-- トースト通知 -->
     <div id="toast-box" class="fixed bottom-3 right-3 left-3 sm:left-auto bg-slate-900 text-white border-l-4 border-amber-400 px-3.5 py-2.5 rounded-xl shadow-xl text-xs font-bold hidden z-50"></div>
 
-    <script src="app-core.js?v=9"></script>
-    <script src="app-ui.js?v=9"></script>
+    <script src="app-core.js?v=10"></script>
+    <script src="app-ui.js?v=10"></script>
 </body>
 </html>
