@@ -1,18 +1,26 @@
 /**
- * app-core.js (v9)
- * ・JANコード完全正規化（数字のみ統一）＋先頭2インストアコード自動価格抽出
- * ・縦横全方向スキャン（正方形クロップ＋0°/90°交互回転＋高コントラスト＋BarcodeDetector併用）
- * ・明るい声の音声読み上げ（pitch=1.25 / rate=1.15 / 40ms遅延でスマホ無音バグ解消）
+ * app-core.js (v10)
+ * ・GAS接続URLの永久固定キー管理（バージョンアップしても消えない）＆URLパラメータ(?gas=)自動取込
+ * ・オフライン送信待ちキュー＆自動リトライ（バックヤード電波対策）
+ * ・AppSheet並みの全方向スキャン（ネイティブBarcodeDetector + ZXing-JS TRY_HARDER）
+ * ・読み上げ辞書変換付き 明るい声TTS ＆ ハンズフリー音声入力
  */
 
-const STORAGE_KEY = 'okegawa_inventory_v9';
-const IDB_NAME = 'OkegawaProductMasterDB';
-const IDB_STORE = 'products';
+const PERMANENT_GAS_URL_KEY = 'OKEGAWA_PERMANENT_GAS_URL';
+const OFFLINE_QUEUE_KEY     = 'OKEGAWA_OFFLINE_QUEUE';
+const STORAGE_KEY           = 'okegawa_inventory_v10';
+const IDB_NAME              = 'OkegawaProductMasterDB';
+const IDB_STORE             = 'products';
 
 const defaultMaster = {
     adminPin: '1234',
-    gasWebhookUrl: '',
-    sheetNames: {}, // 例: { "1": "入口特設", "2": "菓子棚A" }
+    sheetNames: {},
+    alertSettings: {
+        maxQty: 100,
+        maxAmount: 50000,
+        prevRatio: 2.0,
+        warnZeroFromPrev: true
+    },
     workers: [
         '1:佐藤', '2:鈴木', '3:高橋', '4:田中', '5:伊藤',
         '6:渡辺', '7:山本', '8:中村', '9:小林', '10:加藤',
@@ -22,12 +30,16 @@ const defaultMaster = {
 
 let masterData = JSON.parse(JSON.stringify(defaultMaster));
 let inventoryRecords = [];
+let addStockLogs = [];
+let readingDict = [['桶川', 'おけがわ'], ['紅花', 'べにばな'], ['道の駅', 'みちのえき']];
 let productMap = new Map();
+let offlineQueue = [];
 
 const appState = {
     currentWorker: '1:佐藤',
     currentSheetNo: 1,
     workMode: 'count',      // 'count' | 'pickup'
+    fieldLock: 'both',      // 'both' | 'upper' | 'lower'
     activeField: 'upper',   // 'upper' | 'lower'
     selectedRecordId: null,
     inputBuffer: '',
@@ -38,10 +50,38 @@ const appState = {
 };
 
 // ==========================================================
-// 1. JAN正規化 ＆ IndexedDB（2.1万件の商品台帳）
+// 1. 永久固定キーでのGAS URL管理 ＆ QRパラメータ自動取込
 // ==========================================================
 function normalizeJan(raw) {
     return String(raw ?? '').replace(/[^\d]/g, '');
+}
+
+function getActiveGasUrl() {
+    try {
+        return (localStorage.getItem(PERMANENT_GAS_URL_KEY) || '').trim();
+    } catch (e) { return ''; }
+}
+
+function setActiveGasUrl(url) {
+    try {
+        const clean = (url || '').trim();
+        if (clean) localStorage.setItem(PERMANENT_GAS_URL_KEY, clean);
+        else localStorage.removeItem(PERMANENT_GAS_URL_KEY);
+    } catch (e) {}
+}
+
+function captureGasUrlFromQuery() {
+    try {
+        const params = new URLSearchParams(window.location.search);
+        const gasParam = params.get('gas');
+        if (gasParam && gasParam.startsWith('http')) {
+            setActiveGasUrl(gasParam);
+            // アドレスバーからGAS URLを隠す
+            window.history.replaceState({}, document.title, window.location.pathname);
+            return true;
+        }
+    } catch (e) {}
+    return false;
 }
 
 function saveToLocalStorage() {
@@ -49,27 +89,42 @@ function saveToLocalStorage() {
         localStorage.setItem(STORAGE_KEY, JSON.stringify({
             masterData,
             inventoryRecords,
+            addStockLogs,
+            readingDict,
             currentWorker: appState.currentWorker,
-            currentSheetNo: appState.currentSheetNo
+            currentSheetNo: appState.currentSheetNo,
+            fieldLock: appState.fieldLock
         }));
     } catch (e) {}
 }
 
 function loadFromLocalStorage() {
     try {
+        const rawQ = localStorage.getItem(OFFLINE_QUEUE_KEY);
+        if (rawQ) offlineQueue = JSON.parse(rawQ) || [];
+    } catch (e) { offlineQueue = []; }
+
+    try {
         const raw = localStorage.getItem(STORAGE_KEY);
         if (!raw) return;
         const parsed = JSON.parse(raw);
         if (parsed.masterData) {
-            masterData = Object.assign(masterData, parsed.masterData);
+            masterData = Object.assign(JSON.parse(JSON.stringify(defaultMaster)), parsed.masterData);
+            masterData.alertSettings = Object.assign(JSON.parse(JSON.stringify(defaultMaster.alertSettings)), parsed.masterData.alertSettings || {});
             if (!masterData.sheetNames) masterData.sheetNames = {};
         }
         if (Array.isArray(parsed.inventoryRecords)) inventoryRecords = parsed.inventoryRecords;
+        if (Array.isArray(parsed.addStockLogs)) addStockLogs = parsed.addStockLogs;
+        if (Array.isArray(parsed.readingDict)) readingDict = parsed.readingDict;
         if (parsed.currentWorker) appState.currentWorker = parsed.currentWorker;
         if (parsed.currentSheetNo) appState.currentSheetNo = Number(parsed.currentSheetNo) || 1;
+        if (parsed.fieldLock) appState.fieldLock = parsed.fieldLock;
     } catch (e) {}
 }
 
+// ==========================================================
+// 2. IndexedDB（2.1万件の商品台帳 高速検索）
+// ==========================================================
 function openProductDB() {
     return new Promise((resolve, reject) => {
         const req = indexedDB.open(IDB_NAME, 1);
@@ -95,7 +150,7 @@ async function saveProductsToIDB(rows) {
             const jan = normalizeJan(r[0]);
             if (!jan) continue;
             const obj = {
-                jan: jan,
+                jan,
                 name: String(r[1] || '').trim(),
                 price: Number(r[2]) || 0,
                 catMid: String(r[3] || '').trim(),
@@ -125,22 +180,19 @@ async function loadProductsFromIDB() {
             };
             req.onerror = () => resolve(0);
         });
-    } catch (e) {
-        return 0;
-    }
+    } catch (e) { return 0; }
 }
 
 function lookupProductByJan(rawJan) {
     const jan = normalizeJan(rawJan);
-    if (!jan) return { jan: '', name: '未登録商品', price: 0, catMid: '', catSmall: '' };
+    if (!jan) return { jan: '', name: '未登録商品', price: 0, catMid: '一般', catSmall: '' };
 
-    // 先頭「2」のインストアコード（先頭7桁で検索、8〜11桁目を税抜価格とする）
     if (jan.startsWith('2') && jan.length >= 11) {
         const key7 = jan.substring(0, 7);
         const extractedPrice = parseInt(jan.substring(7, 11), 10) || 0;
         const hit = productMap.get(key7);
         return {
-            jan: jan,
+            jan,
             name: hit ? hit.name : `インストア商品(${key7})`,
             price: extractedPrice,
             catMid: hit ? hit.catMid : '一般',
@@ -149,48 +201,112 @@ function lookupProductByJan(rawJan) {
     }
 
     const hit = productMap.get(jan) || productMap.get(jan.replace(/^0+/, ''));
-    if (hit) {
-        return { jan: jan, name: hit.name, price: hit.price, catMid: hit.catMid, catSmall: hit.catSmall };
-    }
-    return { jan: jan, name: '未登録商品（要確認）', price: 0, catMid: '', catSmall: '' };
+    if (hit) return { jan, name: hit.name, price: hit.price, catMid: hit.catMid, catSmall: hit.catSmall };
+    return { jan, name: '未登録商品（要確認）', price: 0, catMid: '一般', catSmall: '' };
 }
 
 // ==========================================================
-// 2. GAS API通信
+// 3. GAS通信 ＆ オフライン送信待ちキュー（機能④）
 // ==========================================================
-function getActiveGasUrl() {
-    return (masterData.gasWebhookUrl || '').trim();
-}
-
 function updateSyncStatusDot(stateStr) {
     const dot = document.getElementById('sync-status-dot');
-    if (!dot) return;
-    if (stateStr === 'ok') dot.className = 'w-2.5 h-2.5 rounded-full bg-emerald-400 shrink-0';
-    else if (stateStr === 'syncing') dot.className = 'w-2.5 h-2.5 rounded-full bg-amber-400 animate-ping shrink-0';
-    else dot.className = 'w-2.5 h-2.5 rounded-full bg-slate-500 shrink-0';
+    if (dot) {
+        if (stateStr === 'ok') dot.className = 'w-2.5 h-2.5 rounded-full bg-emerald-400 shrink-0';
+        else if (stateStr === 'syncing') dot.className = 'w-2.5 h-2.5 rounded-full bg-amber-400 animate-ping shrink-0';
+        else dot.className = 'w-2.5 h-2.5 rounded-full bg-rose-500 shrink-0';
+    }
+    const qBadge = document.getElementById('offline-queue-badge');
+    if (qBadge) {
+        if (offlineQueue.length > 0) {
+            qBadge.textContent = `未送信:${offlineQueue.length}`;
+            qBadge.classList.remove('hidden');
+        } else {
+            qBadge.classList.add('hidden');
+        }
+    }
 }
+
+function saveOfflineQueue() {
+    try { localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(offlineQueue)); } catch (e) {}
+    updateSyncStatusDot(offlineQueue.length > 0 ? 'offline' : 'ok');
+}
+
+async function postToGasApi(payloadObj, queueIfOffline = true) {
+    const url = getActiveGasUrl();
+    if (!url) return false;
+    updateSyncStatusDot('syncing');
+    try {
+        const res = await fetch(url, {
+            method: 'POST',
+            redirect: 'follow',
+            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+            body: JSON.stringify(payloadObj)
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        updateSyncStatusDot(offlineQueue.length > 0 ? 'offline' : 'ok');
+        return true;
+    } catch (e) {
+        if (queueIfOffline) {
+            offlineQueue.push(payloadObj);
+            saveOfflineQueue();
+            showToast(`📶 電波不良のため一時保存（未送信:${offlineQueue.length}件）`);
+        } else {
+            updateSyncStatusDot('offline');
+        }
+        return false;
+    }
+}
+
+async function flushOfflineQueue(showMsg = false) {
+    if (offlineQueue.length === 0 || !getActiveGasUrl() || !navigator.onLine) return;
+    if (showMsg) showToast(`🔄 未送信 ${offlineQueue.length}件を再送信中...`);
+    const remaining = [];
+    for (let i = 0; i < offlineQueue.length; i++) {
+        const ok = await postToGasApi(offlineQueue[i], false);
+        if (!ok) {
+            remaining.push(...offlineQueue.slice(i));
+            break;
+        }
+    }
+    offlineQueue = remaining;
+    saveOfflineQueue();
+    if (showMsg && remaining.length === 0) showToast('✅ 未送信データをすべて送信しました！');
+}
+
+window.addEventListener('online', () => flushOfflineQueue(true));
+setInterval(() => { if (offlineQueue.length > 0 && navigator.onLine) flushOfflineQueue(false); }, 15000);
 
 async function fetchAllFromGasApi(showNotification = true) {
     const url = getActiveGasUrl();
     if (!url) {
         updateSyncStatusDot('offline');
-        if (showNotification) showToast('「⚙️接続」からGASのURLを設定してください');
+        if (showNotification) showToast('「⚙️接続」からGAS URLを設定（またはQR読込）してください');
         return;
     }
+    if (offlineQueue.length > 0) await flushOfflineQueue(false);
+
     updateSyncStatusDot('syncing');
     if (showNotification) showToast('🔄 スプレッドシートと同期中...');
     try {
         const res = await fetch(url + '?type=all&t=' + Date.now(), { method: 'GET', redirect: 'follow' });
         const json = await res.json();
         if (json.status === 'ok' && json.data) {
-            const keepUrl = getActiveGasUrl();
             if (json.data.masterData) {
-                masterData = Object.assign(masterData, json.data.masterData);
-                masterData.gasWebhookUrl = keepUrl;
+                masterData = Object.assign(JSON.parse(JSON.stringify(defaultMaster)), json.data.masterData);
+                masterData.alertSettings = Object.assign(JSON.parse(JSON.stringify(defaultMaster.alertSettings)), json.data.masterData.alertSettings || {});
                 if (!masterData.sheetNames) masterData.sheetNames = {};
+            }
+            if (Array.isArray(json.data.workers) && json.data.workers.length > 0) {
+                masterData.workers = json.data.workers;
+            }
+            if (Array.isArray(json.data.readingDict)) {
+                readingDict = json.data.readingDict;
             }
             if (Array.isArray(json.data.records)) {
                 inventoryRecords = json.data.records;
+            }
+            if (Array.isArray(json.data.addLogs)) {
+                addStockLogs = json.data.addLogs;
             }
             saveToLocalStorage();
             initSheetNoSelects();
@@ -199,20 +315,19 @@ async function fetchAllFromGasApi(showNotification = true) {
             updateSyncStatusDot('ok');
             if (showNotification) showToast('✅ 最新データを同期しました');
 
-            // 端末に商品台帳マスタが0件で、スプレッドシート側にある場合は自動ダウンロード
             if (productMap.size === 0 && (json.data.productCount || 0) > 0) {
                 await downloadProductsFromGas();
             }
         }
     } catch (err) {
         updateSyncStatusDot('offline');
-        if (showNotification) showToast('⚠️ 同期エラー（ローカル保存中）');
+        if (showNotification) showToast('⚠️ 同期エラー（ローカル動作中）');
     }
 }
 
 async function downloadProductsFromGas() {
     const url = getActiveGasUrl();
-    if (!url) return showToast('先に「⚙️接続」からGASのURLを設定してください');
+    if (!url) return showToast('先に「⚙️接続」からGAS URLを設定してください');
     showToast('☁️ 商品台帳マスタをダウンロード中...');
     try {
         const res = await fetch(url + '?type=products&t=' + Date.now(), { method: 'GET', redirect: 'follow' });
@@ -227,23 +342,6 @@ async function downloadProductsFromGas() {
     }
 }
 
-async function postToGasApi(payloadObj) {
-    const url = getActiveGasUrl();
-    if (!url) return;
-    updateSyncStatusDot('syncing');
-    try {
-        await fetch(url, {
-            method: 'POST',
-            redirect: 'follow',
-            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-            body: JSON.stringify(payloadObj)
-        });
-        updateSyncStatusDot('ok');
-    } catch (e) {
-        updateSyncStatusDot('offline');
-    }
-}
-
 function formatNow() {
     const d = new Date();
     const p = n => String(n).padStart(2, '0');
@@ -251,7 +349,7 @@ function formatNow() {
 }
 
 // ==========================================================
-// 3. 電子音（SFX） ＆ 明るい音声読み上げ（TTS）
+// 4. 電子音（SFX） ＆ 読み上げ辞書対応 明るい声TTS
 // ==========================================================
 let audioCtx = null;
 function playTone(freq, type = 'square', dur = 0.07, vol = 0.08) {
@@ -286,15 +384,31 @@ function toggleSound() {
 }
 
 let speakDelayTimer = null;
+let isSpeaking = false;
+
+function applyReadingDict(text) {
+    let out = String(text || '');
+    for (const pair of readingDict) {
+        if (pair[0] && pair[1]) {
+            out = out.split(pair[0]).join(pair[1]);
+        }
+    }
+    return out;
+}
+
 function toggleTts() {
     appState.ttsOn = !appState.ttsOn;
     const btn = document.getElementById('btn-tts');
-    btn.textContent = appState.ttsOn ? '🗣️声:ON' : '🔇声:OFF';
+    btn.textContent = appState.ttsOn ? '🗣️声' : '🔇声';
     btn.className = appState.ttsOn
         ? 'bg-amber-600 text-white font-bold text-[11px] px-1.5 py-1 rounded'
         : 'bg-slate-800 border border-slate-700 text-slate-300 text-[11px] px-1.5 py-1 rounded';
-    if (!appState.ttsOn && window.speechSynthesis) window.speechSynthesis.cancel();
-    else speakText('音声読み上げをオンにしました！', true);
+    if (!appState.ttsOn && window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+        isSpeaking = false;
+    } else {
+        speakText('音声読み上げをオンにしました！', true);
+    }
 }
 
 function speakText(text, force = false) {
@@ -303,17 +417,21 @@ function speakText(text, force = false) {
         clearTimeout(speakDelayTimer);
         window.speechSynthesis.cancel();
         if (window.speechSynthesis.paused) window.speechSynthesis.resume();
+        const converted = applyReadingDict(text);
         speakDelayTimer = setTimeout(() => {
             try {
-                const utter = new SpeechSynthesisUtterance(text);
+                isSpeaking = true;
+                const utter = new SpeechSynthesisUtterance(converted);
                 utter.lang = 'ja-JP';
                 utter.rate = 1.15;
                 utter.pitch = 1.25;
                 utter.volume = 1.0;
+                utter.onend = () => { isSpeaking = false; };
+                utter.onerror = () => { isSpeaking = false; };
                 window.speechSynthesis.speak(utter);
-            } catch (e) {}
+            } catch (e) { isSpeaking = false; }
         }, 40);
-    } catch (e) {}
+    } catch (e) { isSpeaking = false; }
 }
 
 function speakCurrentRecord(force = false, prefix = '') {
@@ -326,51 +444,20 @@ function speakCurrentRecord(force = false, prefix = '') {
 }
 
 // ==========================================================
-// 4. 縦横全方向・高コントラスト連続カメラスキャナー
+// 5. AppSheet並み高精度・全方向バーコードスキャナー（BarcodeDetector + ZXing-JS）
 // ==========================================================
-let mediaStream = null, offscreenVideo = null, isCameraRunning = false;
-let digitalZoom = 1.6, previewLoopId = null, decodeTimerId = null;
-let isDecodingFrame = false, scanFrameParity = 0, scanAttemptCount = 0;
-let lastCandidateCode = '', candidateHitCount = 0;
-let lastAcceptedCode = '', lastAcceptedTime = 0;
-let nativeBarcodeDetector = null;
+let isCameraRunning = false;
+let scannerStream = null;
+let zxingReader = null;
+let nativeDetector = null;
+let nativeScanRaf = null;
+let lastAcceptedCode = '';
+let lastAcceptedTime = 0;
 
 if ('BarcodeDetector' in window) {
     try {
-        nativeBarcodeDetector = new BarcodeDetector({ formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128'] });
-    } catch (e) { nativeBarcodeDetector = null; }
-}
-
-function isValidJanCheckDigit(code) {
-    if (!/^\d{13}$|^\d{8}$/.test(code)) return false;
-    const digits = code.split('').map(Number);
-    const checkDigit = digits.pop();
-    let sum = 0;
-    for (let i = 0; i < digits.length; i++) {
-        sum += digits[i] * (((digits.length - 1 - i) % 2 === 0) ? 3 : 1);
-    }
-    return ((10 - (sum % 10)) % 10) === checkDigit;
-}
-
-function enhanceBarcodeContrast(ctx, w, h) {
-    const imgData = ctx.getImageData(0, 0, w, h);
-    const d = imgData.data;
-    const contrast = 1.65;
-    const intercept = 128 * (1 - contrast);
-    for (let i = 0; i < d.length; i += 4) {
-        const gray = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
-        const adj = gray * contrast + intercept;
-        d[i] = d[i + 1] = d[i + 2] = adj < 0 ? 0 : adj > 255 ? 255 : adj;
-    }
-    ctx.putImageData(imgData, 0, 0);
-}
-
-function calcCoverCrop(vw, vh, destW, destH, zoom) {
-    const srcRatio = vw / vh, destRatio = destW / destH;
-    let baseW = srcRatio > destRatio ? vh * destRatio : vw;
-    let baseH = srcRatio > destRatio ? vh : vw / destRatio;
-    const cropW = baseW / zoom, cropH = baseH / zoom;
-    return { cropX: (vw - cropW) / 2, cropY: (vh - cropH) / 2, cropW, cropH };
+        nativeDetector = new BarcodeDetector({ formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128'] });
+    } catch (e) { nativeDetector = null; }
 }
 
 async function toggleCameraScanner() {
@@ -378,152 +465,135 @@ async function toggleCameraScanner() {
     else await startCameraScanner();
 }
 
+function acceptScannedBarcode(rawText) {
+    const clean = normalizeJan(rawText);
+    if (clean.length < 7) return;
+    const now = Date.now();
+    if (clean === lastAcceptedCode && now - lastAcceptedTime < 1600) return;
+    lastAcceptedCode = clean;
+    lastAcceptedTime = now;
+    handleBarcodeScan(clean);
+}
+
 async function startCameraScanner() {
     if (isCameraRunning) return;
+    const videoEl = document.getElementById('scanner-video');
+    const wrapper = document.getElementById('camera-wrapper');
+    const badge = document.getElementById('scan-engine-badge');
+
     try {
-        offscreenVideo = document.createElement('video');
-        offscreenVideo.setAttribute('playsinline', '');
-        offscreenVideo.muted = true;
-        offscreenVideo.autoplay = true;
-        mediaStream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        scannerStream = await navigator.mediaDevices.getUserMedia({
+            video: {
+                facingMode: { ideal: 'environment' },
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+                focusMode: 'continuous'
+            },
             audio: false
         });
-        offscreenVideo.srcObject = mediaStream;
-        await offscreenVideo.play();
+        videoEl.srcObject = scannerStream;
+        await videoEl.play();
+
+        // ハードウェアの連続オートフォーカスを強制適用（対応端末のみ）
+        try {
+            const track = scannerStream.getVideoTracks()[0];
+            const caps = track.getCapabilities ? track.getCapabilities() : {};
+            if (caps.focusMode && caps.focusMode.includes('continuous')) {
+                await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
+            }
+        } catch (e) {}
 
         isCameraRunning = true;
-        scanAttemptCount = 0;
-        document.getElementById('camera-wrapper').classList.remove('hidden');
+        wrapper.classList.remove('hidden');
         document.getElementById('cam-btn-label').textContent = '停止';
 
-        const previewCanvas = document.getElementById('preview-canvas');
-        const previewCtx = previewCanvas.getContext('2d', { alpha: false });
-
-        const renderPreview = () => {
-            if (!isCameraRunning || !offscreenVideo) return;
-            if (offscreenVideo.readyState >= 2 && offscreenVideo.videoWidth > 0) {
-                const vw = offscreenVideo.videoWidth, vh = offscreenVideo.videoHeight;
-                const rect = previewCanvas.getBoundingClientRect();
-                const targetW = Math.max(280, Math.round(rect.width * 1.5));
-                const targetH = Math.max(176, Math.round(rect.height * 1.5));
-                if (previewCanvas.width !== targetW || previewCanvas.height !== targetH) {
-                    previewCanvas.width = targetW;
-                    previewCanvas.height = targetH;
-                }
-                const { cropX, cropY, cropW, cropH } = calcCoverCrop(vw, vh, targetW, targetH, digitalZoom);
-                previewCtx.drawImage(offscreenVideo, cropX, cropY, cropW, cropH, 0, 0, targetW, targetH);
-            }
-            previewLoopId = requestAnimationFrame(renderPreview);
-        };
-        renderPreview();
-
-        const decodeCanvas = document.getElementById('decode-canvas');
-        const decodeCtx = decodeCanvas.getContext('2d', { willReadFrequently: true });
-
-        decodeTimerId = setInterval(async () => {
-            if (!isCameraRunning || isDecodingFrame || !offscreenVideo || offscreenVideo.readyState < 3) return;
-            isDecodingFrame = true;
-            scanAttemptCount++;
-            const dbg = document.getElementById('scan-debug-info');
-            if (dbg) dbg.textContent = `解析:${scanAttemptCount}`;
-
-            const acceptCode = (code) => {
-                const clean = normalizeJan(code);
-                if (clean.length < 8) return;
-                const now = Date.now();
-                if (clean === lastAcceptedCode && now - lastAcceptedTime < 1800) return;
-                lastAcceptedCode = clean;
-                lastAcceptedTime = now;
-                lastCandidateCode = '';
-                candidateHitCount = 0;
-                handleBarcodeScan(clean);
-            };
-
-            // 1. ネイティブBarcodeDetector（縦横問わず超高速）
-            if (nativeBarcodeDetector) {
-                try {
-                    const barcodes = await nativeBarcodeDetector.detect(previewCanvas);
-                    if (barcodes && barcodes.length > 0 && barcodes[0].rawValue) {
-                        isDecodingFrame = false;
-                        acceptCode(barcodes[0].rawValue);
-                        return;
-                    }
-                } catch (e) {}
-            }
-
-            // 2. Quagga2 正方形クロップ＋0°/90°交互回転＋高コントラスト解析
-            const vw = offscreenVideo.videoWidth, vh = offscreenVideo.videoHeight;
-            const sqSize = Math.floor(Math.min(vw, vh) / digitalZoom);
-            const sx = Math.floor((vw - sqSize) / 2);
-            const sy = Math.floor((vh - sqSize) / 2);
-
-            const rotate90 = (scanFrameParity % 2 === 1);
-            scanFrameParity++;
-            const size = 560;
-            decodeCanvas.width = size;
-            decodeCanvas.height = size;
-
-            decodeCtx.save();
-            decodeCtx.setTransform(1, 0, 0, 1, 0, 0);
-            if (rotate90) {
-                decodeCtx.translate(size / 2, size / 2);
-                decodeCtx.rotate(Math.PI / 2);
-                decodeCtx.drawImage(offscreenVideo, sx, sy, sqSize, sqSize, -size / 2, -size / 2, size, size);
-            } else {
-                decodeCtx.drawImage(offscreenVideo, sx, sy, sqSize, sqSize, 0, 0, size, size);
-            }
-            decodeCtx.restore();
-
-            enhanceBarcodeContrast(decodeCtx, size, size);
-            const dataUrl = decodeCanvas.toDataURL('image/jpeg', 0.88);
-
-            Quagga.decodeSingle({
-                src: dataUrl, numOfWorkers: 0, locate: true,
-                inputStream: { size: size },
-                decoder: { readers: ['ean_reader', 'ean_8_reader', 'upc_reader', 'code_128_reader'] }
-            }, (result) => {
-                isDecodingFrame = false;
+        // エンジン①：ネイティブBarcodeDetector（Android Chrome等で最速・縦横斜め完全対応）
+        if (nativeDetector) {
+            badge.textContent = '⚡ Native全方向スキャン';
+            const detectLoop = async () => {
                 if (!isCameraRunning) return;
-                if (result && result.codeResult && result.codeResult.code) {
-                    const code = normalizeJan(result.codeResult.code);
-                    if (code === lastCandidateCode) candidateHitCount++;
-                    else { lastCandidateCode = code; candidateHitCount = 1; }
-                    if (candidateHitCount >= 2 || isValidJanCheckDigit(code)) {
-                        acceptCode(code);
-                    }
+                if (videoEl.readyState >= 2) {
+                    try {
+                        const codes = await nativeDetector.detect(videoEl);
+                        if (codes && codes.length > 0 && codes[0].rawValue) {
+                            acceptScannedBarcode(codes[0].rawValue);
+                        }
+                    } catch (e) {}
+                }
+                nativeScanRaf = requestAnimationFrame(detectLoop);
+            };
+            detectLoop();
+        } else if (window.ZXing) {
+            // エンジン②：ZXing-JS TRY_HARDER（iPhone Safariでも縦・横・斜めを高精度認識）
+            badge.textContent = '⚡ ZXing全方向スキャン';
+            const hints = new Map();
+            hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+            hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+                ZXing.BarcodeFormat.EAN_13,
+                ZXing.BarcodeFormat.EAN_8,
+                ZXing.BarcodeFormat.UPC_A,
+                ZXing.BarcodeFormat.CODE_128
+            ]);
+            zxingReader = new ZXing.BrowserMultiFormatReader(hints, 120);
+            zxingReader.decodeFromStream(scannerStream, videoEl, (result, err) => {
+                if (!isCameraRunning) return;
+                if (result && result.getText) {
+                    acceptScannedBarcode(result.getText());
                 }
             });
-        }, 70);
+        } else {
+            badge.textContent = '⚠️ スキャナー読込中';
+        }
     } catch (err) {
         showToast('カメラ起動エラー: ' + err.message);
         await stopCameraScanner();
     }
 }
 
-function setDigitalZoom(z) {
-    digitalZoom = z;
-    ['z-btn-10', 'z-btn-16', 'z-btn-22'].forEach(id => {
-        document.getElementById(id).className = 'bg-slate-900/80 text-white text-[10px] font-bold px-1.5 py-0.5 rounded';
-    });
-    const act = z === 1.0 ? 'z-btn-10' : z === 1.6 ? 'z-btn-16' : 'z-btn-22';
-    document.getElementById(act).className = 'bg-emerald-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded';
-}
-
 async function stopCameraScanner() {
     isCameraRunning = false;
-    if (previewLoopId) cancelAnimationFrame(previewLoopId);
-    if (decodeTimerId) clearInterval(decodeTimerId);
-    if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
-    mediaStream = null; offscreenVideo = null;
+    if (nativeScanRaf) { cancelAnimationFrame(nativeScanRaf); nativeScanRaf = null; }
+    if (zxingReader) { try { zxingReader.reset(); } catch (e) {} zxingReader = null; }
+    if (scannerStream) {
+        scannerStream.getTracks().forEach(t => t.stop());
+        scannerStream = null;
+    }
+    const videoEl = document.getElementById('scanner-video');
+    if (videoEl) videoEl.srcObject = null;
     document.getElementById('camera-wrapper').classList.add('hidden');
     document.getElementById('cam-btn-label').textContent = 'スキャン';
 }
 
 // ==========================================================
-// 5. 音声入力（数字・棚上・棚下・先月同数・次へ）
+// 6. ハンズフリー音声入力（読み上げ途中割り込み・ひらがな/漢数字対応）
 // ==========================================================
 let recognition = null;
+function extractJapaneseNumber(str) {
+    let norm = str
+        .replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0))
+        .replace(/[\u30a1-\u30f6]/g, m => String.fromCharCode(m.charCodeAt(0) - 0x60));
+    const digitMatch = norm.match(/\d+/);
+    if (digitMatch) return parseInt(digitMatch[0], 10);
+
+    const rep = [
+        ['さんびゃく', '三百'], ['ろっぴゃく', '六百'], ['はっぴゃく', '八百'], ['ひゃく', '百'],
+        ['じゅう', '十'], ['ぜろ', '〇'], ['れい', '〇'],
+        ['いち', '一'], ['ひと', '一'], ['に', '二'], ['ふた', '二'],
+        ['さん', '三'], ['みっ', '三'], ['よん', '四'], ['し', '四'], ['よっ', '四'],
+        ['ご', '五'], ['いつ', '五'], ['ろく', '六'], ['むっ', '六'],
+        ['なな', '七'], ['しち', '七'], ['はち', '八'], ['やっ', '八'], ['きゅう', '九'], ['く', '九']
+    ];
+    for (const [h, k] of rep) norm = norm.split(h).join(k);
+    const map = { '零':0, '〇':0, '一':1, '二':2, '三':3, '四':4, '五':5, '六':6, '七':7, '八':8, '九':9 };
+    let total = 0, cur = 0, ok = false;
+    for (const ch of norm) {
+        if (map[ch] !== undefined) { cur = map[ch]; ok = true; }
+        else if (ch === '十') { total += (cur || 1) * 10; cur = 0; ok = true; }
+        else if (ch === '百') { total += (cur || 1) * 100; cur = 0; ok = true; }
+    }
+    return ok ? total + cur : null;
+}
+
 function toggleVoiceRecognition() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) return showToast('このブラウザは音声入力に非対応です');
@@ -542,19 +612,24 @@ function toggleVoiceRecognition() {
     recognition.continuous = false;
     recognition.onresult = (e) => {
         const text = e.results[0][0].transcript.trim();
+        // 読み上げ中でも割り込みコマンドを受け付け
+        if (window.speechSynthesis && isSpeaking) {
+            window.speechSynthesis.cancel();
+            isSpeaking = false;
+        }
         document.getElementById('voice-transcript').textContent = `認識: 「${text}」`;
         if (/棚上|たなうえ/.test(text)) setActiveField('upper');
         if (/棚下|たなした/.test(text)) setActiveField('lower');
         if (/先月|前回|同じ/.test(text)) copyPrevMonthQty();
-        const numMatch = text.replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0)).match(/\d+/);
-        if (numMatch) {
-            appState.inputBuffer = numMatch[0];
+        const num = extractJapaneseNumber(text);
+        if (num !== null) {
+            appState.inputBuffer = String(num);
             applyBufferToCurrentRecord();
         }
-        if (/次|つぎ|確定|かくてい|はい/.test(text)) confirmAndNextRecord();
+        if (/次|つぎ|確定|かくてい|はい|オッケー|OK/i.test(text)) confirmAndNextRecord();
     };
     recognition.onend = () => {
-        if (appState.isListening) setTimeout(() => { try { recognition.start(); } catch (e) {} }, 200);
+        if (appState.isListening) setTimeout(() => { try { recognition.start(); } catch (e) {} }, 220);
     };
 
     appState.isListening = true;
