@@ -1,14 +1,13 @@
 /**
- * app-core.js (v11)
- * ・縦横完全対応ノンストップ連続スキャン（0°横・90°縦を交互に正方形クロップ＋ZXing & BarcodeDetector併用＋1.5秒自動復帰）
- * ・スピードUP読み上げ「商品名、先月〇〇個、棚上/棚下、数量どうぞ」（即時発声・スマホ無音バグ対策）
- * ・完全排他制御マイク（読み上げ中は停止→終了200ms後に自動聴取＋タップで即割り込み）
- * ・事前ピックアップ画面では音声読み上げ・マイクを完全停止
+ * app-core.js (v12)
+ * ・DOM安全配置videoによるカメラ停止/復帰の完全安定化 ＋ 連続スキャン/1回停止の切替
+ * ・maxAlternatives=5 ＋ 日本語同音異義語テーブルによる高精度な数字音声認識
+ * ・スピードUP読み上げ「商品名、先月〇〇個、棚上/棚下、数量どうぞ」＋完全排他マイク
  */
 
 const PERMANENT_GAS_URL_KEY = 'OKEGAWA_PERMANENT_GAS_URL';
 const OFFLINE_QUEUE_KEY     = 'OKEGAWA_OFFLINE_QUEUE';
-const STORAGE_KEY           = 'okegawa_inventory_v10'; // 既存データそのまま引き継ぎ
+const STORAGE_KEY           = 'okegawa_inventory_v10';
 const IDB_NAME              = 'OkegawaProductMasterDB';
 const IDB_STORE             = 'products';
 
@@ -36,11 +35,13 @@ let productMap = new Map();
 let offlineQueue = [];
 
 const appState = {
-    currentView: 'mobile',  // 'mobile' | 'pickup' | 'admin'
+    currentView: 'mobile',      // 'mobile' | 'pickup' | 'admin'
+    mobileListFilter: 'all',    // 'all' | 'uncounted' | 'anomaly' | 'memo'
+    cameraContinuous: true,     // true: 連続スキャン / false: 1回読取で自動停止
     currentWorker: '1:佐藤',
     currentSheetNo: 1,
-    fieldLock: 'both',      // 'both' | 'upper' | 'lower'
-    activeField: 'upper',   // 'upper' | 'lower'
+    fieldLock: 'both',          // 'both' | 'upper' | 'lower'
+    activeField: 'upper',       // 'upper' | 'lower'
     selectedRecordId: null,
     inputBuffer: '',
     isAdminUnlocked: false,
@@ -121,7 +122,7 @@ function loadFromLocalStorage() {
 }
 
 // ==========================================================
-// 2. IndexedDB（2.1万件の商品台帳 高速検索）
+// 2. IndexedDB（2.1万件の商品台帳）
 // ==========================================================
 function openProductDB() {
     return new Promise((resolve, reject) => {
@@ -294,18 +295,11 @@ async function fetchAllFromGasApi(showNotification = true) {
                 masterData.alertSettings = Object.assign(JSON.parse(JSON.stringify(defaultMaster.alertSettings)), json.data.masterData.alertSettings || {});
                 if (!masterData.sheetNames) masterData.sheetNames = {};
             }
-            if (Array.isArray(json.data.workers) && json.data.workers.length > 0) {
-                masterData.workers = json.data.workers;
-            }
-            if (Array.isArray(json.data.readingDict)) {
-                readingDict = json.data.readingDict;
-            }
-            if (Array.isArray(json.data.records)) {
-                inventoryRecords = json.data.records;
-            }
-            if (Array.isArray(json.data.addLogs)) {
-                addStockLogs = json.data.addLogs;
-            }
+            if (Array.isArray(json.data.workers) && json.data.workers.length > 0) masterData.workers = json.data.workers;
+            if (Array.isArray(json.data.readingDict)) readingDict = json.data.readingDict;
+            if (Array.isArray(json.data.records)) inventoryRecords = json.data.records;
+            if (Array.isArray(json.data.addLogs)) addStockLogs = json.data.addLogs;
+
             saveToLocalStorage();
             initSheetNoSelects();
             renderWorkerSelect();
@@ -347,7 +341,7 @@ function formatNow() {
 }
 
 // ==========================================================
-// 4. 電子音（SFX） ＆ スピードUP読み上げ（完全排他マイク連携）
+// 4. 電子音（SFX）＆ 高精度数字音声認識（5候補＋同音異義語辞書）
 // ==========================================================
 let audioCtx = null;
 function playTone(freq, type = 'square', dur = 0.07, vol = 0.08) {
@@ -411,16 +405,10 @@ function toggleTts() {
 
 function startRecognitionSafely() {
     if (!appState.isListening || isSpeaking || appState.currentView !== 'mobile' || !recognition) return;
-    try {
-        recognition.start();
-    } catch (e) {}
+    try { recognition.start(); } catch (e) {}
 }
 
-/**
- * 即時発声（iOS無音対策）＋ 読み上げ中はマイクを停止し、完了200ms後にマイク自動再開する完全排他制御
- */
 function speakText(text, force = false) {
-    // ピックアップ専用画面では一切発声しない
     if (appState.currentView === 'pickup') return;
     if ((!appState.ttsOn && !force) || !('speechSynthesis' in window)) {
         isSpeaking = false;
@@ -432,16 +420,15 @@ function speakText(text, force = false) {
         window.speechSynthesis.cancel();
         if (window.speechSynthesis.paused) window.speechSynthesis.resume();
 
-        // 排他制御：読み上げ開始時にマイクを一時停止
         isSpeaking = true;
         if (recognition) { try { recognition.abort(); } catch (e) {} }
         const trEl = document.getElementById('voice-transcript');
-        if (appState.isListening && trEl) trEl.textContent = '🗣️ 読み上げ中...（タップで即話す）';
+        if (appState.isListening && trEl) trEl.textContent = '🗣️ 読み上げ中...';
 
         const utter = new SpeechSynthesisUtterance(applyReadingDict(text));
         utter.lang = 'ja-JP';
-        utter.rate = 1.22;  // スピードUP
-        utter.pitch = 1.25; // 明るいトーン
+        utter.rate = 1.22;
+        utter.pitch = 1.25;
         utter.volume = 1.0;
 
         const finishSpeak = () => {
@@ -449,8 +436,8 @@ function speakText(text, force = false) {
             if (!isSpeaking) return;
             isSpeaking = false;
             if (appState.isListening && appState.currentView === 'mobile') {
-                if (trEl) trEl.textContent = '👂 聞き取り中...（数字 / 次へ / 先月同じ）';
-                setTimeout(startRecognitionSafely, 200);
+                if (trEl) trEl.textContent = '👂 聞き取り中...（数字 / 次へ）';
+                setTimeout(startRecognitionSafely, 220);
             }
         };
 
@@ -465,9 +452,6 @@ function speakText(text, force = false) {
     }
 }
 
-/**
- * スピードUP読み上げ：「商品名、先月〇〇個、棚上（または棚下）、数量どうぞ」
- */
 function speakCurrentRecord(force = false) {
     if (appState.currentView !== 'mobile') return;
     const rec = getCurrentRecord();
@@ -503,12 +487,35 @@ function stopVoiceAll() {
     if (bar) bar.classList.add('hidden');
 }
 
+/**
+ * 短い日本語の数字・誤変換しやすい漢字（位置→1、後→5、蜂→8 等）を完全変換
+ */
 function extractJapaneseNumber(str) {
-    let norm = str
+    let norm = String(str || '')
         .replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0))
-        .replace(/[\u30a1-\u30f6]/g, m => String.fromCharCode(m.charCodeAt(0) - 0x60));
+        .replace(/[\u30a1-\u30f6]/g, m => String.fromCharCode(m.charCodeAt(0) - 0x60))
+        .replace(/個|こ|本|ほん|ぽん|ぼん|箱|はこ|つ|枚|まい|袋|ふくろ|パック|ケース|です|だよ|ね/g, '')
+        .trim();
+
     const digitMatch = norm.match(/\d+/);
     if (digitMatch) return parseInt(digitMatch[0], 10);
+
+    // 短い数字でスマホが誤変換しがちな漢字・単語を完全網羅
+    const exactHomophones = {
+        '例': 0, '霊': 0, '礼': 0, 'ゼロ': 0, 'ぜろ': 0, 'れい': 0, 'まる': 0, '丸': 0, 'なし': 0, '無し': 0,
+        '位置': 1, '市': 1, '壱': 1, 'いち': 1, 'ひとつ': 1, '一つ': 1,
+        '荷': 2, '似': 2, '煮': 2, '弐': 2, 'に': 2, 'ふたつ': 2, '二つ': 2,
+        '山': 3, '産': 3, '参': 3, 'さん': 3, 'みっつ': 3, '三つ': 3,
+        '世': 4, '夜': 4, '余': 4, 'よん': 4, 'し': 4, 'よっつ': 4, '四つ': 4,
+        '語': 5, '後': 5, '午': 5, '期': 5, 'ご': 5, 'いつつ': 5, '五つ': 5,
+        '録': 6, '緑': 6, 'ろく': 6, 'むっつ': 6, '六つ': 6,
+        '菜々': 7, 'なな': 7, 'しち': 7, 'ななつ': 7, '七つ': 7,
+        '蜂': 8, '鉢': 8, '橋': 8, '端': 8, 'はち': 8, 'やっつ': 8, '八つ': 8,
+        '球': 9, '急': 9, '旧': 9, '救': 9, 'きゅう': 9, 'く': 9, 'ここのつ': 9, '九つ': 9,
+        '銃': 10, '中': 10, '重': 10, '自由': 10, 'じゅう': 10, 'とお': 10,
+        '二十': 20, 'はたち': 20, 'にじゅう': 20
+    };
+    if (exactHomophones[norm] !== undefined) return exactHomophones[norm];
 
     const rep = [
         ['さんびゃく', '三百'], ['ろっぴゃく', '六百'], ['はっぴゃく', '八百'], ['ひゃく', '百'],
@@ -543,45 +550,59 @@ function toggleVoiceRecognition() {
     recognition.lang = 'ja-JP';
     recognition.continuous = false;
     recognition.interimResults = false;
+    recognition.maxAlternatives = 5; // 最大5候補すべてから数字を探索
 
     recognition.onstart = () => {
         const trEl = document.getElementById('voice-transcript');
-        if (trEl && !isSpeaking) trEl.textContent = '👂 聞き取り中...（数字 / 次へ / 先月同じ）';
+        if (trEl && !isSpeaking) trEl.textContent = '👂 聞き取り中...（数字 / 次へ）';
     };
 
     recognition.onresult = (e) => {
         if (isSpeaking) return;
-        const text = e.results[0][0].transcript.trim();
+        const resultItem = e.results[0];
+        const alts = [];
+        for (let i = 0; i < resultItem.length; i++) {
+            alts.push(resultItem[i].transcript.trim());
+        }
+        const primaryText = alts[0] || '';
+        const allJoined = alts.join(' ');
         const trEl = document.getElementById('voice-transcript');
-        if (trEl) trEl.textContent = `✅ 認識: 「${text}」`;
+        if (trEl) trEl.textContent = `✅ 認識: 「${primaryText}」`;
 
-        if (/もう一回|もう一度|読み上げ/.test(text)) { speakCurrentRecord(true); return; }
-        if (/戻る|前/.test(text)) { movePrevRecord(); return; }
-        if (/クリア|ゼロ|取り消し/.test(text)) { clearQtyInput(); SFX.voiceOk(); speakText('ゼロ、どうぞ'); return; }
-        if (/棚上|たなうえ/.test(text)) setActiveField('upper');
-        if (/棚下|たなした/.test(text)) setActiveField('lower');
-        if (/先月|前回|同じ/.test(text)) {
+        if (/もう一回|もう一度|読み上げ/.test(allJoined)) { speakCurrentRecord(true); return; }
+        if (/戻る|前/.test(allJoined)) { movePrevRecord(); return; }
+        if (/クリア|取り消し/.test(allJoined)) { clearQtyInput(); SFX.voiceOk(); speakText('クリア'); return; }
+        if (/棚上|たなうえ/.test(allJoined)) setActiveField('upper');
+        if (/棚下|たなした/.test(allJoined)) setActiveField('lower');
+        if (/先月|前回|同じ|同数/.test(allJoined)) {
             copyPrevMonthQty();
             SFX.voiceOk();
-            if (/次|確定|はい|オッケー|OK/i.test(text)) { confirmAndNextRecord(); return; }
+            if (/次|確定|はい|オッケー|OK/i.test(allJoined)) { confirmAndNextRecord(); return; }
             speakText('先月同数、次へで確定');
             return;
         }
 
-        const num = extractJapaneseNumber(text);
-        if (num !== null) {
+        // 5候補の中から最初にヒットした数字を採用
+        let foundNum = null;
+        for (const cand of alts) {
+            const n = extractJapaneseNumber(cand);
+            if (n !== null) { foundNum = n; break; }
+        }
+
+        if (foundNum !== null) {
             SFX.voiceOk();
-            appState.inputBuffer = String(num);
+            appState.inputBuffer = String(foundNum);
             applyBufferToCurrentRecord();
-            if (/次|確定|はい|オッケー|OK/i.test(text)) {
+            if (trEl) trEl.textContent = `✅ 数字認識: ${foundNum}（「${primaryText}」）`;
+            if (/次|確定|はい|オッケー|OK/i.test(allJoined)) {
                 confirmAndNextRecord();
             } else {
-                speakText(`${num}、次へで確定`);
+                speakText(`${foundNum}、次へで確定`);
             }
             return;
         }
 
-        if (/次|つぎ|確定|かくてい|はい|オッケー|OK/i.test(text)) {
+        if (/次|つぎ|確定|かくてい|はい|オッケー|OK/i.test(allJoined)) {
             confirmAndNextRecord();
         }
     };
@@ -607,11 +628,10 @@ function toggleVoiceRecognition() {
 }
 
 // ==========================================================
-// 5. 縦・横交互クロップ ZXing + BarcodeDetector ノンストップ連続スキャナー
+// 5. DOM配置videoによる縦・横交互全方向スキャナー（確実に停止・復帰）
 // ==========================================================
 let isCameraRunning = false;
 let scannerStream = null;
-let offscreenVideo = null;
 let previewLoopId = null;
 let decodeTimerId = null;
 let digitalZoom = 1.5;
@@ -663,14 +683,28 @@ function calcCoverCrop(vw, vh, destW, destH, zoom) {
     return { cropX: (vw - cw) / 2, cropY: (vh - ch) / 2, cropW: cw, cropH: ch };
 }
 
+function toggleCameraContinuousMode() {
+    appState.cameraContinuous = !appState.cameraContinuous;
+    document.querySelectorAll('.cam-mode-btn').forEach(btn => {
+        btn.textContent = appState.cameraContinuous ? '連続ON' : '1回で閉じる';
+        btn.className = appState.cameraContinuous
+            ? 'cam-mode-btn bg-blue-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded'
+            : 'cam-mode-btn bg-amber-500 text-slate-950 text-[10px] font-bold px-1.5 py-0.5 rounded';
+    });
+}
+
 function acceptScannedCode(raw) {
     const clean = normalizeJan(raw);
     if (clean.length < 7) return;
     const now = Date.now();
-    // 同一商品の連続誤爆だけ1.8秒ブロック（別商品なら即ノンストップ連続スキャン）
     if (clean === lastAcceptedCode && now - lastAcceptedTime < 1800) return;
     lastAcceptedCode = clean;
     lastAcceptedTime = now;
+
+    // 「1回で閉じる」モード時はスキャン成功後にカメラを確実に閉じる
+    if (!appState.cameraContinuous) {
+        stopCameraScanner();
+    }
     handleBarcodeScan(clean);
 }
 
@@ -692,19 +726,14 @@ async function toggleCameraScanner() {
 
 async function startCameraScanner() {
     if (isCameraRunning) return;
+    const videoEl = document.getElementById('camera-source-video');
     try {
-        offscreenVideo = document.createElement('video');
-        offscreenVideo.setAttribute('playsinline', '');
-        offscreenVideo.setAttribute('webkit-playsinline', 'true');
-        offscreenVideo.muted = true;
-        offscreenVideo.autoplay = true;
-
         scannerStream = await navigator.mediaDevices.getUserMedia({
             video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
             audio: false
         });
-        offscreenVideo.srcObject = scannerStream;
-        await offscreenVideo.play();
+        videoEl.srcObject = scannerStream;
+        await videoEl.play();
 
         try {
             const track = scannerStream.getVideoTracks()[0];
@@ -719,35 +748,32 @@ async function startCameraScanner() {
         scanCount = 0;
         updateCameraContainersVisibility();
 
-        // プレビュー描画ループ（現在開いている画面のcanvasへ描画）
         const renderPreview = () => {
-            if (!isCameraRunning || !offscreenVideo) return;
+            if (!isCameraRunning) return;
             const canvasId = appState.currentView === 'pickup' ? 'preview-canvas-pickup' : 'preview-canvas-mobile';
             const pCanvas = document.getElementById(canvasId);
-            if (pCanvas && offscreenVideo.readyState >= 2 && offscreenVideo.videoWidth > 0) {
+            if (pCanvas && videoEl.readyState >= 2 && videoEl.videoWidth > 0) {
                 const rect = pCanvas.getBoundingClientRect();
                 if (rect.width > 0 && rect.height > 0) {
                     const tw = Math.max(280, Math.round(rect.width * 1.5));
                     const th = Math.max(160, Math.round(rect.height * 1.5));
                     if (pCanvas.width !== tw || pCanvas.height !== th) { pCanvas.width = tw; pCanvas.height = th; }
                     const ctx = pCanvas.getContext('2d', { alpha: false });
-                    const { cropX, cropY, cropW, cropH } = calcCoverCrop(offscreenVideo.videoWidth, offscreenVideo.videoHeight, tw, th, digitalZoom);
-                    ctx.drawImage(offscreenVideo, cropX, cropY, cropW, cropH, 0, 0, tw, th);
+                    const { cropX, cropY, cropW, cropH } = calcCoverCrop(videoEl.videoWidth, videoEl.videoHeight, tw, th, digitalZoom);
+                    ctx.drawImage(videoEl, cropX, cropY, cropW, cropH, 0, 0, tw, th);
                 }
             }
             previewLoopId = requestAnimationFrame(renderPreview);
         };
         renderPreview();
 
-        // デコードループ（0°横・90°縦を交互に解析＋1.5秒フリーズ自動復帰）
         const dCanvas = document.getElementById('decode-canvas');
         const dCtx = dCanvas.getContext('2d', { willReadFrequently: true });
 
         decodeTimerId = setInterval(async () => {
-            if (!isCameraRunning || appState.isModalOpen || appState.currentView === 'admin' || !offscreenVideo) return;
-            if (offscreenVideo.readyState < 3 || offscreenVideo.videoWidth === 0) return;
+            if (!isCameraRunning || appState.isModalOpen || appState.currentView === 'admin') return;
+            if (videoEl.readyState < 3 || videoEl.videoWidth === 0) return;
 
-            // 万が一解析が1.5秒以上詰まったら強制リセット（「カメラが戻らない」根絶）
             if (isDecodingFrame) {
                 if (Date.now() - decodeStartTime > 1500) isDecodingFrame = false;
                 else return;
@@ -756,7 +782,7 @@ async function startCameraScanner() {
             isDecodingFrame = true;
             decodeStartTime = Date.now();
             scanCount++;
-            const step = scanParity % 4; // 0:横通常, 1:縦通常, 2:横高コン, 3:縦高コン
+            const step = scanParity % 4;
             scanParity++;
             const isVertical = (step % 2 === 1);
             const useContrast = (step >= 2);
@@ -766,8 +792,7 @@ async function startCameraScanner() {
             if (dbgEl) dbgEl.textContent = `${isVertical ? '縦' : '横'}解析:${scanCount}`;
 
             try {
-                // 1. 正方形クロップ＋0°/90°回転してデコード用キャンバスに描画
-                const vw = offscreenVideo.videoWidth, vh = offscreenVideo.videoHeight;
+                const vw = videoEl.videoWidth, vh = videoEl.videoHeight;
                 const sq = Math.floor(Math.min(vw, vh) / digitalZoom);
                 const sx = Math.floor((vw - sq) / 2);
                 const sy = Math.floor((vh - sq) / 2);
@@ -780,13 +805,12 @@ async function startCameraScanner() {
                 if (isVertical) {
                     dCtx.translate(size / 2, size / 2);
                     dCtx.rotate(Math.PI / 2);
-                    dCtx.drawImage(offscreenVideo, sx, sy, sq, sq, -size / 2, -size / 2, size, size);
+                    dCtx.drawImage(videoEl, sx, sy, sq, sq, -size / 2, -size / 2, size, size);
                 } else {
-                    dCtx.drawImage(offscreenVideo, sx, sy, sq, sq, 0, 0, size, size);
+                    dCtx.drawImage(videoEl, sx, sy, sq, sq, 0, 0, size, size);
                 }
                 dCtx.restore();
 
-                // 2. ネイティブBarcodeDetector（高速・全方向）
                 if (nativeDetector && !useContrast) {
                     const codes = await nativeDetector.detect(dCanvas);
                     if (codes && codes.length > 0 && codes[0].rawValue) {
@@ -795,7 +819,6 @@ async function startCameraScanner() {
                     }
                 }
 
-                // 3. ZXing-JS（0°横・90°縦 ＆ 通常/高コントラスト交互）
                 if (useContrast) enhanceContrast(dCtx, size, size);
                 const reader = getZxingReader();
                 if (reader) {
@@ -838,6 +861,10 @@ async function stopCameraScanner() {
         scannerStream.getTracks().forEach(t => t.stop());
         scannerStream = null;
     }
-    offscreenVideo = null;
+    const videoEl = document.getElementById('camera-source-video');
+    if (videoEl) {
+        try { videoEl.pause(); } catch (e) {}
+        videoEl.srcObject = null;
+    }
     updateCameraContainersVisibility();
 }
