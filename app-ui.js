@@ -1,8 +1,8 @@
 /**
- * app-ui.js
- * ・用紙No.運用 / 前日ピックアップ＆当日カウント / 棚上・棚下入力
- * ・桁違いガード（100個以上・5万円以上・6桁以上）
- * ・商品台帳Excel投げ込み登録 / Excel数式保護2ステップコピー / バックアップ
+ * app-ui.js (v9)
+ * ・Excel投げ込みで「商品台帳」＋「棚卸し表（先月分）」を同時取込
+ * ・先月数表示＆「先月同数」ワンタップ入力 / 桁違いガード
+ * ・用紙区画名メモ＆商品の手入力追加 / 2ステップExcel貼付コピー
  */
 
 window.addEventListener('DOMContentLoaded', async () => {
@@ -18,9 +18,11 @@ window.addEventListener('DOMContentLoaded', async () => {
 function initSheetNoSelects() {
     const mSel = document.getElementById('m-sheet-no');
     const pSel = document.getElementById('pc-export-sheet-no');
+    const names = masterData.sheetNames || {};
     let html = '';
     for (let i = 1; i <= 200; i++) {
-        html += `<option value="${i}">用紙 No.${i}</option>`;
+        const label = names[String(i)] ? `No.${i} (${names[String(i)]})` : `用紙 No.${i}`;
+        html += `<option value="${i}">${label}</option>`;
     }
     mSel.innerHTML = html;
     pSel.innerHTML = html;
@@ -48,6 +50,29 @@ function onSheetNoChange(val) {
     renderMobileView();
 }
 
+function openEditSheetNameModal() {
+    const no = String(appState.currentSheetNo);
+    const cur = (masterData.sheetNames && masterData.sheetNames[no]) || '';
+    openModal(`✏️ 用紙 No.${no} の区画名設定`, `
+        <p class="text-xs text-slate-600">売場の区画名やメモを登録すると、プルダウンに表示されて選びやすくなります。</p>
+        <input id="inp-sheet-name" type="text" value="${cur}" placeholder="例：入口特設、酒コーナー、冷蔵棚A" class="w-full border rounded-lg p-2 text-sm">
+        <button onclick="saveSheetName()" class="w-full bg-blue-600 text-white font-bold py-2 rounded-lg">区画名を保存</button>
+    `);
+}
+
+function saveSheetName() {
+    const no = String(appState.currentSheetNo);
+    const val = document.getElementById('inp-sheet-name').value.trim();
+    if (!masterData.sheetNames) masterData.sheetNames = {};
+    if (val) masterData.sheetNames[no] = val;
+    else delete masterData.sheetNames[no];
+    saveToLocalStorage();
+    postToGasApi({ action: 'saveMaster', masterData });
+    initSheetNoSelects();
+    closeModal();
+    showToast(`✅ 用紙 No.${no} の区画名を更新しました`);
+}
+
 function setWorkMode(mode) {
     appState.workMode = mode;
     const btnC = document.getElementById('mode-btn-count');
@@ -56,17 +81,15 @@ function setWorkMode(mode) {
     const pad = document.getElementById('keypad-area');
 
     if (mode === 'pickup') {
-        btnP.className = 'py-1.5 rounded-md bg-amber-500 text-slate-950 shadow';
-        btnC.className = 'py-1.5 rounded-md text-slate-600';
+        btnP.className = 'py-1 rounded-md bg-amber-500 text-slate-950 shadow';
+        btnC.className = 'py-1 rounded-md text-slate-600';
         card.classList.add('hidden');
         pad.classList.add('hidden');
-        document.getElementById('scan-mode-hint').textContent = '📋 事前ピックアップ中：スキャンするたび別行で追加されます';
     } else {
-        btnC.className = 'py-1.5 rounded-md bg-blue-600 text-white shadow';
-        btnP.className = 'py-1.5 rounded-md text-slate-600';
+        btnC.className = 'py-1 rounded-md bg-blue-600 text-white shadow';
+        btnP.className = 'py-1 rounded-md text-slate-600';
         card.classList.remove('hidden');
         pad.classList.remove('hidden');
-        document.getElementById('scan-mode-hint').textContent = '🔢 カウント中：スキャンした商品を呼び出し（なければ新規行追加）';
     }
 }
 
@@ -82,34 +105,31 @@ function getCurrentRecord() {
 }
 
 // ==========================================================
-// 1. バーコードスキャン処理（同一JAN別行登録対応）
+// 1. バーコードスキャン ＆ 商品の手入力追加
 // ==========================================================
 function handleBarcodeScan(rawCode) {
-    const jan = String(rawCode || '').trim();
+    const jan = normalizeJan(rawCode);
     if (!jan) return;
     document.getElementById('barcode-input').value = '';
     SFX.scan();
 
     const sheetList = getCurrentSheetRecords();
 
-    // 当日カウントモード：同じ用紙内に「未入力の同一JAN」があればそれを呼び出す
     if (appState.workMode === 'count') {
-        const uncountedHit = sheetList.find(r => r.jan === jan && r.status !== 'done');
+        const uncountedHit = sheetList.find(r => normalizeJan(r.jan) === jan && r.status !== 'done');
         if (uncountedHit) {
-            selectRecord(uncountedHit.id);
+            selectRecord(uncountedHit.id, true);
             showToast(`🔍 呼出: ${uncountedHit.name}`);
             return;
         }
     }
 
-    // 40行上限チェック（Excelの1用紙＝40行）
     if (sheetList.length >= 40) {
         SFX.err();
-        alert(`用紙 No.${appState.currentSheetNo} は上限40行に達しています！\n次の用紙No.に切り替えてください。`);
+        alert(`用紙 No.${appState.currentSheetNo} は上限40行に達しています！次の用紙No.に切り替えてください。`);
         return;
     }
 
-    // 新規行として追加（前日ピックアップ or 当日別場所での追加発見）
     const info = lookupProductByJan(jan);
     const maxOrder = sheetList.reduce((m, r) => Math.max(m, r.rowOrder || 0), 0);
     const newRec = {
@@ -123,6 +143,8 @@ function handleBarcodeScan(rawCode) {
         price: info.price,
         qtyUpper: null,
         qtyLower: null,
+        prevUpper: null,
+        prevLower: null,
         status: 'uncounted',
         worker: appState.currentWorker,
         updatedAt: formatNow()
@@ -134,11 +156,92 @@ function handleBarcodeScan(rawCode) {
     saveToLocalStorage();
     postToGasApi({ action: 'saveRecord', record: newRec });
     renderAllViews();
+    speakCurrentRecord(false);
     showToast(`➕ 行${sheetList.length + 1}に追加: ${newRec.name}`);
 }
 
+function openManualAddProductModal() {
+    openModal(`＋ 用紙 No.${appState.currentSheetNo} へ商品を手入力追加`, `
+        <div class="space-y-2">
+            <div>
+                <label class="font-bold text-xs block">用紙No. (1〜200)</label>
+                <input id="man-sheet" type="number" min="1" max="200" value="${appState.currentSheetNo}" class="w-full border rounded-lg p-1.5 font-mono">
+            </div>
+            <div>
+                <label class="font-bold text-xs block">JANコード（空欄でも可）</label>
+                <div class="flex gap-1">
+                    <input id="man-jan" type="text" inputmode="numeric" placeholder="49..." class="flex-1 border rounded-lg p-1.5 font-mono">
+                    <button onclick="autofillManualJan()" class="bg-slate-800 text-white text-xs px-2.5 rounded-lg">台帳検索</button>
+                </div>
+            </div>
+            <div>
+                <label class="font-bold text-xs block">商品名（必須）</label>
+                <input id="man-name" type="text" placeholder="例：地元野菜セット" class="w-full border rounded-lg p-1.5">
+            </div>
+            <div class="grid grid-cols-3 gap-2">
+                <div>
+                    <label class="font-bold text-xs block">上代(税抜)</label>
+                    <input id="man-price" type="number" value="0" class="w-full border rounded-lg p-1.5 font-mono">
+                </div>
+                <div>
+                    <label class="font-bold text-xs block">棚上(任意)</label>
+                    <input id="man-upper" type="number" placeholder="空欄可" class="w-full border rounded-lg p-1.5 font-mono">
+                </div>
+                <div>
+                    <label class="font-bold text-xs block">棚下(任意)</label>
+                    <input id="man-lower" type="number" placeholder="空欄可" class="w-full border rounded-lg p-1.5 font-mono">
+                </div>
+            </div>
+            <button onclick="saveManualProduct()" class="w-full bg-blue-600 text-white font-bold py-2.5 rounded-xl mt-2">この内容で追加する</button>
+        </div>
+    `);
+}
+
+function autofillManualJan() {
+    const jan = normalizeJan(document.getElementById('man-jan').value);
+    if (!jan) return;
+    const info = lookupProductByJan(jan);
+    document.getElementById('man-name').value = info.name;
+    document.getElementById('man-price').value = info.price;
+}
+
+function saveManualProduct() {
+    const sheetNo = Number(document.getElementById('man-sheet').value) || appState.currentSheetNo;
+    const jan = normalizeJan(document.getElementById('man-jan').value);
+    const name = document.getElementById('man-name').value.trim();
+    const price = Number(document.getElementById('man-price').value) || 0;
+    const uRaw = document.getElementById('man-upper').value.trim();
+    const lRaw = document.getElementById('man-lower').value.trim();
+    if (!name) return alert('商品名を入力してください');
+
+    const sheetList = inventoryRecords.filter(r => Number(r.sheetNo) === sheetNo);
+    if (sheetList.length >= 40) return alert(`用紙 No.${sheetNo} は上限40行に達しています`);
+
+    const qU = uRaw === '' ? null : Number(uRaw);
+    const qL = lRaw === '' ? null : Number(lRaw);
+    const status = (qU !== null && qL !== null) ? 'done' : (qU !== null || qL !== null) ? 'partial' : 'uncounted';
+    const maxOrder = sheetList.reduce((m, r) => Math.max(m, r.rowOrder || 0), 0);
+
+    const newRec = {
+        id: 'REC-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
+        sheetNo, rowOrder: maxOrder + 1, jan, name, catMid: '一般', catSmall: '', price,
+        qtyUpper: qU, qtyLower: qL, prevUpper: null, prevLower: null,
+        status, worker: appState.currentWorker, updatedAt: formatNow()
+    };
+
+    inventoryRecords.push(newRec);
+    appState.currentSheetNo = sheetNo;
+    appState.selectedRecordId = newRec.id;
+    document.getElementById('m-sheet-no').value = sheetNo;
+    saveToLocalStorage();
+    postToGasApi({ action: 'saveRecord', record: newRec });
+    closeModal();
+    renderAllViews();
+    showToast(`✅ 用紙No.${sheetNo}に「${name}」を追加しました`);
+}
+
 // ==========================================================
-// 2. 棚上・棚下 数量入力 ＆ 桁違いガード
+// 2. 棚上・棚下 数量入力 ＆ 先月同数 ＆ 桁違いガード
 // ==========================================================
 function setActiveField(field) {
     appState.activeField = field;
@@ -185,10 +288,13 @@ function applyBufferToCurrentRecord() {
     renderMobileCard();
 }
 
-function setZeroAndNext() {
-    appState.inputBuffer = '0';
+function copyPrevMonthQty() {
+    const rec = getCurrentRecord();
+    if (!rec) return;
+    SFX.key();
+    const prevVal = appState.activeField === 'upper' ? (rec.prevUpper ?? 0) : (rec.prevLower ?? 0);
+    appState.inputBuffer = String(prevVal);
     applyBufferToCurrentRecord();
-    confirmAndNextRecord();
 }
 
 function confirmAndNextRecord() {
@@ -200,16 +306,14 @@ function confirmAndNextRecord() {
     const total = qU + qL;
     const amount = total * (Number(rec.price) || 0);
 
-    // ★桁違い・JAN誤入力ガード
     if (qU >= 10000 || qL >= 10000) {
         SFX.err();
-        if (!confirm(`⚠️ 桁数が大きすぎます（棚上:${qU} / 棚下:${qL}）。\nバーコードを数量欄に入力していませんか？\nこのまま確定しますか？`)) return;
+        if (!confirm(`⚠️ 桁数が大きすぎます（棚上:${qU} / 棚下:${qL}）。\nバーコードを数量欄に入力していませんか？`)) return;
     } else if (total >= 100 || amount >= 50000) {
         SFX.err();
         if (!confirm(`⚠️ 数量または金額が大きいです。\n${rec.name}\n合計: ${total}個（金額: ¥${amount.toLocaleString()}）\n間違いありませんか？`)) return;
     }
 
-    // 状態更新（棚上・棚下の両方に値があれば done、片方のみなら partial）
     if (rec.qtyUpper !== null && rec.qtyLower !== null) rec.status = 'done';
     else if (rec.qtyUpper !== null || rec.qtyLower !== null) rec.status = 'partial';
     else rec.status = 'uncounted';
@@ -220,13 +324,13 @@ function confirmAndNextRecord() {
     postToGasApi({ action: 'saveRecord', record: rec });
     SFX.next();
 
-    // 次の行へ移動
     const list = getCurrentSheetRecords();
     const idx = list.findIndex(r => r.id === rec.id);
     if (idx >= 0 && idx < list.length - 1) {
-        selectRecord(list[idx + 1].id);
+        selectRecord(list[idx + 1].id, true);
     } else {
         renderAllViews();
+        speakText(`用紙${appState.currentSheetNo}番の最終行まで完了しました！`);
         showToast(`✅ 用紙 No.${appState.currentSheetNo} の最終行まで完了しました`);
     }
 }
@@ -234,10 +338,10 @@ function confirmAndNextRecord() {
 function movePrevRecord() {
     const list = getCurrentSheetRecords();
     const idx = list.findIndex(r => r.id === appState.selectedRecordId);
-    if (idx > 0) selectRecord(list[idx - 1].id);
+    if (idx > 0) selectRecord(list[idx - 1].id, true);
 }
 
-function selectRecord(id) {
+function selectRecord(id, autoSpeak = false) {
     appState.selectedRecordId = id;
     const rec = getCurrentRecord();
     if (rec) {
@@ -245,10 +349,11 @@ function selectRecord(id) {
         appState.inputBuffer = (curVal === null || curVal === undefined) ? '' : String(curVal);
     }
     renderMobileView();
+    if (autoSpeak) speakCurrentRecord(false);
 }
 
 // ==========================================================
-// 3. 画面描画（スマホ・PC管理）
+// 3. 画面描画
 // ==========================================================
 function renderAllViews() {
     renderMobileView();
@@ -258,8 +363,9 @@ function renderAllViews() {
 function renderMobileView() {
     const list = getCurrentSheetRecords();
     const uncounted = list.filter(r => r.status === 'uncounted').length;
-    document.getElementById('m-sheet-count-badge').textContent = `${list.length}/40行`;
+    document.getElementById('m-sheet-count-badge').textContent = `${list.length}/40`;
     document.getElementById('m-uncounted-badge').textContent = `未${uncounted}`;
+    document.getElementById('m-master-badge').textContent = `台帳:${productMap.size.toLocaleString()}件`;
     renderMobileCard();
     renderMobileList();
 }
@@ -278,7 +384,8 @@ function renderMobileCard() {
 
     if (!rec) {
         document.getElementById('m-cur-meta').textContent = `No.${appState.currentSheetNo} / 商品未登録`;
-        document.getElementById('m-cur-name').textContent = 'スキャンして商品を追加してください';
+        document.getElementById('m-cur-name').textContent = 'スキャンまたは「＋手入力」で追加してください';
+        document.getElementById('m-cur-prev-info').textContent = '先月:-';
         document.getElementById('m-cur-price-amt').textContent = '¥0';
         document.getElementById('m-val-upper').textContent = '-';
         document.getElementById('m-val-lower').textContent = '-';
@@ -290,10 +397,13 @@ function renderMobileCard() {
     const rowIdx = list.findIndex(r => r.id === rec.id) + 1;
     const total = (Number(rec.qtyUpper) || 0) + (Number(rec.qtyLower) || 0);
     const amt = total * (Number(rec.price) || 0);
+    const pU = rec.prevUpper ?? '-';
+    const pL = rec.prevLower ?? '-';
 
-    document.getElementById('m-cur-meta').textContent = `No.${rec.sheetNo} / ${rowIdx}行目 / JAN:${rec.jan}`;
+    document.getElementById('m-cur-meta').textContent = `No.${rec.sheetNo} / ${rowIdx}行目 / JAN:${rec.jan || '-'}`;
     document.getElementById('m-cur-name').textContent = rec.name;
-    document.getElementById('m-cur-price-amt').textContent = `¥${(rec.price || 0).toLocaleString()} × ${total} = ¥${amt.toLocaleString()}`;
+    document.getElementById('m-cur-prev-info').textContent = `先月 上:${pU} 下:${pL}`;
+    document.getElementById('m-cur-price-amt').textContent = `¥${amt.toLocaleString()}`;
     document.getElementById('m-val-upper').textContent = rec.qtyUpper === null ? '-' : rec.qtyUpper;
     document.getElementById('m-val-lower').textContent = rec.qtyLower === null ? '-' : rec.qtyLower;
     document.getElementById('m-val-total').textContent = total;
@@ -313,16 +423,17 @@ function renderMobileList() {
     container.innerHTML = filtered.map((r) => {
         const rowNum = list.findIndex(x => x.id === r.id) + 1;
         const isSel = r.id === appState.selectedRecordId;
+        const prevTot = (r.prevUpper !== null || r.prevLower !== null) ? ((Number(r.prevUpper) || 0) + (Number(r.prevLower) || 0)) : '-';
         const badge = r.status === 'done'
             ? '<span class="bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded font-bold">済</span>'
             : r.status === 'partial'
                 ? '<span class="bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded font-bold">片方済</span>'
                 : '<span class="bg-rose-100 text-rose-700 px-1.5 py-0.5 rounded font-bold">未</span>';
         return `
-        <div onclick="selectRecord('${r.id}')" class="p-2 flex items-center justify-between gap-2 cursor-pointer ${isSel ? 'bg-blue-50 border-l-4 border-blue-600' : 'hover:bg-slate-50'}">
+        <div onclick="selectRecord('${r.id}', true)" class="p-2 flex items-center justify-between gap-2 cursor-pointer ${isSel ? 'bg-blue-50 border-l-4 border-blue-600' : 'hover:bg-slate-50'}">
             <div class="min-w-0 flex-1">
                 <div class="font-bold text-slate-800 truncate">${rowNum}. ${r.name}</div>
-                <div class="text-[10px] text-slate-500 font-mono">JAN:${r.jan} | ¥${r.price}</div>
+                <div class="text-[10px] text-slate-500 font-mono">JAN:${r.jan || '-'} | ¥${r.price} | 先月:${prevTot}</div>
             </div>
             <div class="text-right shrink-0">
                 <div class="font-mono font-bold text-slate-900">上:${r.qtyUpper ?? '-'} / 下:${r.qtyLower ?? '-'}</div>
@@ -333,13 +444,10 @@ function renderMobileList() {
 }
 
 // ==========================================================
-// 4. PC管理画面・Excel投げ込み・2ステップ貼り付けコピー
+// 4. PC管理画面・Excel投げ込み（商品台帳 ＋ 先月棚卸し表）
 // ==========================================================
 function requestAdminView() {
-    if (appState.isAdminUnlocked) {
-        switchToAdminView();
-        return;
-    }
+    if (appState.isAdminUnlocked) return switchToAdminView();
     const pin = prompt('管理者PINコードを入力してください（初期値: 1234）');
     if (pin === masterData.adminPin) {
         appState.isAdminUnlocked = true;
@@ -392,7 +500,7 @@ function renderAdminExportTable() {
     const tbody = document.getElementById('pc-export-tbody');
 
     if (list.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="11" class="p-6 text-center text-slate-400">用紙 No.${sheetNo} に登録されたデータはありません</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="11" class="p-6 text-center text-slate-400">用紙 No.${sheetNo} にデータはありません</td></tr>`;
         return;
     }
 
@@ -403,17 +511,15 @@ function renderAdminExportTable() {
         <tr class="hover:bg-slate-50">
             <td class="p-2 font-mono text-slate-500">${i + 1}</td>
             <td class="p-2 font-mono font-bold">${r.jan}</td>
-            <td class="p-2">${r.catMid || '-'} / ${r.catSmall || '-'}</td>
             <td class="p-2 font-bold">${r.name}</td>
             <td class="p-2 text-right font-mono">¥${(r.price || 0).toLocaleString()}</td>
+            <td class="p-2 text-right font-mono text-amber-700">${r.prevUpper ?? '-'}/${r.prevLower ?? '-'}</td>
             <td class="p-2 text-right font-mono font-bold bg-blue-50">${r.qtyUpper ?? ''}</td>
             <td class="p-2 text-right font-mono font-bold bg-blue-50">${r.qtyLower ?? ''}</td>
             <td class="p-2 text-right font-mono font-bold">${total}</td>
             <td class="p-2 text-right font-mono">¥${amt.toLocaleString()}</td>
             <td class="p-2">${r.worker || ''} (${r.status})</td>
-            <td class="p-2 text-center">
-                <button onclick="deleteRecordById('${r.id}')" class="text-rose-600 font-bold hover:underline">削除</button>
-            </td>
+            <td class="p-2 text-center"><button onclick="deleteRecordById('${r.id}')" class="text-rose-600 font-bold">削除</button></td>
         </tr>`;
     }).join('');
 }
@@ -429,34 +535,28 @@ function deleteRecordById(id) {
 function copyExcelColumnA() {
     const sheetNo = Number(document.getElementById('pc-export-sheet-no').value) || 1;
     const list = inventoryRecords.filter(r => Number(r.sheetNo) === sheetNo).sort((a, b) => (a.rowOrder || 0) - (b.rowOrder || 0));
-    const text = list.map(r => r.jan).join('\n');
-    navigator.clipboard.writeText(text).then(() => showToast(`✅ 用紙No.${sheetNo}のA列（JAN ${list.length}行）をコピーしました`));
+    navigator.clipboard.writeText(list.map(r => r.jan).join('\n')).then(() => showToast(`✅ 用紙No.${sheetNo}のA列（JAN ${list.length}行）をコピーしました`));
 }
 
 function copyExcelColumnJK() {
     const sheetNo = Number(document.getElementById('pc-export-sheet-no').value) || 1;
     const list = inventoryRecords.filter(r => Number(r.sheetNo) === sheetNo).sort((a, b) => (a.rowOrder || 0) - (b.rowOrder || 0));
-    const text = list.map(r => `${r.qtyUpper ?? ''}\t${r.qtyLower ?? ''}`).join('\n');
-    navigator.clipboard.writeText(text).then(() => showToast(`✅ 用紙No.${sheetNo}のJ・K列（棚上・棚下 ${list.length}行）をコピーしました`));
+    navigator.clipboard.writeText(list.map(r => `${r.qtyUpper ?? ''}\t${r.qtyLower ?? ''}`).join('\n')).then(() => showToast(`✅ 用紙No.${sheetNo}のJ・K列（棚上・棚下 ${list.length}行）をコピーしました`));
 }
 
 function downloadAllCsv() {
-    const header = ['用紙No', '行順', 'JANコード', '商品名', '中分類', '小分類', '上代税抜', '棚上', '棚下', '合計', '金額', '担当者', '更新日時'];
+    const header = ['用紙No', '行順', 'JANコード', '商品名', '上代税抜', '先月棚上', '先月棚下', '棚上', '棚下', '合計', '金額', '担当者', '更新日時'];
     const sorted = [...inventoryRecords].sort((a, b) => (a.sheetNo - b.sheetNo) || (a.rowOrder - b.rowOrder));
     const rows = sorted.map(r => {
         const t = (Number(r.qtyUpper) || 0) + (Number(r.qtyLower) || 0);
-        return [r.sheetNo, r.rowOrder, `="${r.jan}"`, `"${r.name}"`, r.catMid, r.catSmall, r.price, r.qtyUpper ?? '', r.qtyLower ?? '', t, t * (r.price || 0), r.worker, r.updatedAt].join(',');
+        return [r.sheetNo, r.rowOrder, `="${r.jan}"`, `"${r.name}"`, r.price, r.prevUpper ?? '', r.prevLower ?? '', r.qtyUpper ?? '', r.qtyLower ?? '', t, t * (r.price || 0), r.worker, r.updatedAt].join(',');
     });
-    const csv = '\uFEFF' + [header.join(','), ...rows].join('\n');
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
+    a.href = URL.createObjectURL(new Blob(['\uFEFF' + [header.join(','), ...rows].join('\n')], { type: 'text/csv;charset=utf-8;' }));
     a.download = `道の駅おけがわ_棚卸データ_${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
 }
 
-// ==========================================================
-// 5. 商品台帳Excel 投げ込み登録（SheetJS + GASチャンク送信）
-// ==========================================================
 function setupExcelDropZone() {
     const zone = document.getElementById('drop-zone');
     const input = document.getElementById('excel-file-input');
@@ -472,6 +572,8 @@ function setupExcelDropZone() {
 
 async function handleExcelDropFile(file) {
     if (!file) return;
+    const doProducts = document.getElementById('chk-import-products').checked;
+    const doLastMonth = document.getElementById('chk-import-lastmonth').checked;
     const box = document.getElementById('import-status-box');
     box.classList.remove('hidden');
     box.textContent = `⏳ 「${file.name}」を解析中...`;
@@ -479,53 +581,105 @@ async function handleExcelDropFile(file) {
     try {
         const data = await file.arrayBuffer();
         const wb = XLSX.read(data, { type: 'array' });
-        const targetSheetName = wb.SheetNames.find(n => n.includes('商品台帳')) || wb.SheetNames[0];
-        const ws = wb.Sheets[targetSheetName];
-        const rawRows = XLSX.utils.sheet_to_json(ws, { header: 1 });
-
-        // 添付Excel「商品台帳」の列構成：0=商品コード, 1=商品名称, 3=POS売価, 18=中分類, 19=小分類
-        const parsed = [];
-        for (let i = 1; i < rawRows.length; i++) {
-            const r = rawRows[i];
-            if (!r || !r[0]) continue;
-            parsed.push([
-                String(r[0]).trim(),
-                String(r[1] || '').trim(),
-                Number(r[3]) || 0,
-                String(r[18] || '').trim(),
-                String(r[19] || '').trim()
-            ]);
-        }
-
-        const savedCount = await saveProductsToIDB(parsed);
-        box.textContent = `✅ 端末への高速キャッシュ完了（${savedCount.toLocaleString()}件）。GASへ送信中...`;
-
-        // GASへ4,000件ずつチャンク送信
         const url = getActiveGasUrl();
-        if (url) {
-            const CHUNK = 4000;
-            for (let c = 0; c < parsed.length; c += CHUNK) {
-                const slice = parsed.slice(c, c + CHUNK);
-                box.textContent = `☁️ スプレッドシートへ登録中... (${Math.min(c + CHUNK, parsed.length).toLocaleString()} / ${parsed.length.toLocaleString()}件)`;
-                await postToGasApi({ action: 'uploadProductsChunk', chunkIndex: c, rows: slice });
+        let logMsg = '';
+
+        // ① 商品台帳シートの取込
+        if (doProducts) {
+            const prodSheetName = wb.SheetNames.find(n => n.includes('商品台帳'));
+            if (prodSheetName) {
+                const rawRows = XLSX.utils.sheet_to_json(wb.Sheets[prodSheetName], { header: 1 });
+                const parsed = [];
+                for (let i = 1; i < rawRows.length; i++) {
+                    const r = rawRows[i];
+                    const jan = normalizeJan(r && r[0]);
+                    if (!jan) continue;
+                    parsed.push([jan, String(r[1] || '').trim(), Number(r[3]) || 0, String(r[18] || '').trim(), String(r[19] || '').trim()]);
+                }
+                const savedCount = await saveProductsToIDB(parsed);
+                logMsg += `✅ 商品台帳: ${savedCount.toLocaleString()}件を端末へ登録\n`;
+                box.textContent = logMsg + '☁️ 商品台帳をスプレッドシートへ送信中...';
+
+                if (url) {
+                    const CHUNK = 4000;
+                    for (let c = 0; c < parsed.length; c += CHUNK) {
+                        await postToGasApi({ action: 'uploadProductsChunk', chunkIndex: c, rows: parsed.slice(c, c + CHUNK) });
+                    }
+                    logMsg += `☁️ 商品台帳: スプレッドシートへ登録完了\n`;
+                }
             }
-            box.textContent = `🎉 完了！「${targetSheetName}」から ${savedCount.toLocaleString()}件を端末とスプレッドシートの両方に登録しました。`;
-        } else {
-            box.textContent = `✅ 端末に ${savedCount.toLocaleString()}件を登録しました（※GAS URL未設定のため端末内のみ保存）。`;
         }
-        renderAdminDashboard();
+
+        // ② 棚卸し表シート（先月分）の取込（47行ブロック × 最大200用紙）
+        if (doLastMonth) {
+            const invSheetName = wb.SheetNames.find(n => n.includes('棚卸し表'));
+            if (invSheetName) {
+                const rawInv = XLSX.utils.sheet_to_json(wb.Sheets[invSheetName], { header: 1 });
+                const importedRecs = [];
+                const gasRows = [];
+                let sheetNo = 1;
+
+                for (let blockStart = 0; blockStart < rawInv.length; blockStart += 47) {
+                    let rowOrder = 1;
+                    // 各ブロックの 6〜45行目（0始まり）がデータ40行
+                    for (let offset = 6; offset <= 45; offset++) {
+                        const r = rawInv[blockStart + offset];
+                        if (!r) continue;
+                        const jan = normalizeJan(r[0]);
+                        if (!jan) continue;
+                        const info = lookupProductByJan(jan);
+                        const name = (r[7] && String(r[7]).trim() !== '0') ? String(r[7]).trim() : info.name;
+                        const price = (Number(r[6]) > 0) ? Number(r[6]) : info.price;
+                        const prevU = (r[9] !== undefined && r[9] !== null && r[9] !== '') ? Number(r[9]) : null;
+                        const prevL = (r[10] !== undefined && r[10] !== null && r[10] !== '') ? Number(r[10]) : null;
+
+                        const id = `PRE-${sheetNo}-${rowOrder}-${Date.now()}`;
+                        importedRecs.push({
+                            id, sheetNo, rowOrder, jan, name,
+                            catMid: info.catMid, catSmall: info.catSmall, price,
+                            qtyUpper: null, qtyLower: null,
+                            prevUpper: prevU, prevLower: prevL,
+                            status: 'uncounted', worker: '', updatedAt: ''
+                        });
+                        gasRows.push([
+                            id, sheetNo, rowOrder, jan, name,
+                            info.catMid, info.catSmall, price,
+                            '', '', 0, 0, 'uncounted', '', '',
+                            prevU === null ? '' : prevU, prevL === null ? '' : prevL
+                        ]);
+                        rowOrder++;
+                    }
+                    sheetNo++;
+                }
+
+                inventoryRecords = importedRecs;
+                saveToLocalStorage();
+                logMsg += `✅ 先月棚卸し表: ${importedRecs.length.toLocaleString()}行を取り込み（今月数は空欄でセット）\n`;
+                box.textContent = logMsg + '☁️ 先月棚卸し表をスプレッドシートへ送信中...';
+
+                if (url && gasRows.length > 0) {
+                    const CHUNK = 1000;
+                    for (let c = 0; c < gasRows.length; c += CHUNK) {
+                        await postToGasApi({ action: 'uploadRecordsChunk', chunkIndex: c, rows: gasRows.slice(c, c + CHUNK) });
+                    }
+                    logMsg += `☁️ 先月棚卸し表: スプレッドシートへ登録完了\n`;
+                }
+            }
+        }
+
+        box.textContent = logMsg + '🎉 すべての取込が完了しました！';
+        renderAllViews();
     } catch (err) {
         box.textContent = `⚠️ 読込エラー: ${err.message}`;
     }
 }
 
 // ==========================================================
-// 6. 設定・接続・バックアップモーダル
+// 5. 設定・接続・バックアップモーダル
 // ==========================================================
 function saveWorkersList() {
-    const raw = document.getElementById('mst-workers-input').value;
-    const list = raw.split(',').map(s => s.trim()).filter(Boolean).slice(0, 15);
-    if (list.length === 0) return;
+    const list = document.getElementById('mst-workers-input').value.split(',').map(s => s.trim()).filter(Boolean).slice(0, 15);
+    if (!list.length) return;
     masterData.workers = list;
     saveToLocalStorage();
     postToGasApi({ action: 'saveMaster', masterData });
@@ -559,7 +713,7 @@ function saveGasUrl() {
 
 function openBackupModal() {
     openModal('💾 バックアップ・データ復元', `
-        <p class="text-xs text-slate-600">万が一の通信障害に備え、端末内の全棚卸データをJSONファイルとして保存・復元できます。</p>
+        <p class="text-xs text-slate-600">端末内の全棚卸データをJSONファイルとして保存・復元できます。</p>
         <button onclick="exportBackupJson()" class="w-full bg-emerald-600 text-white font-bold py-2.5 rounded-xl">⬇️ バックアップファイル(.json)を保存</button>
         <div class="pt-3 border-t">
             <label class="font-bold text-xs block mb-1">📂 バックアップから復元</label>
@@ -569,9 +723,8 @@ function openBackupModal() {
 }
 
 function exportBackupJson() {
-    const data = JSON.stringify({ masterData, inventoryRecords, exportedAt: formatNow() }, null, 2);
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([data], { type: 'application/json' }));
+    a.href = URL.createObjectURL(new Blob([JSON.stringify({ masterData, inventoryRecords, exportedAt: formatNow() }, null, 2)], { type: 'application/json' }));
     a.download = `okegawa_backup_${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
 }
@@ -585,12 +738,11 @@ function importBackupJson(file) {
             if (parsed.masterData) masterData = Object.assign(masterData, parsed.masterData);
             if (Array.isArray(parsed.inventoryRecords)) inventoryRecords = parsed.inventoryRecords;
             saveToLocalStorage();
+            initSheetNoSelects();
             renderAllViews();
             closeModal();
             showToast('✅ バックアップから復元しました');
-        } catch (err) {
-            alert('復元に失敗しました');
-        }
+        } catch (err) { alert('復元に失敗しました'); }
     };
     reader.readAsText(file);
 }
