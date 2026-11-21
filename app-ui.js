@@ -1,5 +1,6 @@
 /**
- * app-ui.js（解決策B：UI制御・後から追加登録・GAS API設定＆完全バックアップ機能）
+ * app-ui.js
+ * UI制御・リストタップ時の明るい音声読み上げ・後から追加登録・GAS API設定＆完全バックアップ機能
  */
 
 window.addEventListener('DOMContentLoaded', () => {
@@ -121,7 +122,7 @@ function renderMobileDetailsAndList() {
         const isCur = r.id === rec.id;
         const tot = getRecordTotalQty(r);
         return `
-            <div onclick="selectRecordById('${r.id}')" class="p-1.5 rounded-lg border flex justify-between items-center cursor-pointer ${isCur ? 'bg-blue-50 border-blue-400 font-bold' : 'bg-slate-50 border-slate-200'}">
+            <div onclick="selectRecordById('${r.id}', true)" class="p-1.5 rounded-lg border flex justify-between items-center cursor-pointer ${isCur ? 'bg-blue-50 border-blue-400 font-bold' : 'bg-slate-50 border-slate-200'}">
                 <span>📍 ${r.area} / ${r.shelf} / ${r.level}</span>
                 <span class="font-mono">初回:${r.baseQty} ${r.addedQty > 0 ? `<b class="text-amber-600">+追:${r.addedQty}</b>` : ''} = <b>${tot}${r.unit}</b></span>
             </div>
@@ -152,7 +153,7 @@ function renderMobileDetailsAndList() {
         const isSel = r.id === rec.id;
         const tot = getRecordTotalQty(r);
         return `
-            <div onclick="selectRecordById('${r.id}')" class="px-2.5 py-2 flex items-center justify-between cursor-pointer ${isSel ? 'bg-amber-100 border-l-4 border-amber-500 font-bold' : 'hover:bg-slate-50'}">
+            <div onclick="selectRecordById('${r.id}', true)" class="px-2.5 py-2 flex items-center justify-between cursor-pointer ${isSel ? 'bg-amber-100 border-l-4 border-amber-500 font-bold' : 'hover:bg-slate-50'}">
                 <div class="min-w-0 pr-2">
                     <div class="text-slate-900 truncate">${r.name} <span class="bg-slate-200 text-slate-700 px-1 rounded text-[10px]">${r.unit}</span></div>
                     <div class="text-[10px] text-slate-500">${r.area}・${r.shelf}・${r.level}</div>
@@ -171,11 +172,13 @@ function renderMobileDetailsAndList() {
     }).join('');
 }
 
-function selectRecordById(id) {
+function selectRecordById(id, autoSpeak = false) {
+    unlockTtsOnFirstTap();
     appState.selectedRecordId = id;
     appState.inputBuffer = '';
     SFX.key();
     renderAllViews();
+    if (autoSpeak) speakCurrentRecord(false);
 }
 
 function changeCurrentProductUnit(newUnit) {
@@ -197,6 +200,7 @@ function applyBufferToCurrentRecord() {
 }
 
 function pressNumKey(digit) {
+    unlockTtsOnFirstTap();
     SFX.key();
     if (appState.inputBuffer.length >= 5) return;
     if (appState.inputBuffer === '0') appState.inputBuffer = '';
@@ -222,6 +226,7 @@ function backspaceQty() {
 }
 
 function adjustQty(delta) {
+    unlockTtsOnFirstTap();
     SFX.key();
     const rec = getCurrentRecord();
     rec.baseQty = Math.max(0, (Number(rec.baseQty) || 0) + delta);
@@ -230,6 +235,7 @@ function adjustQty(delta) {
 }
 
 function copyPrevQty() {
+    unlockTtsOnFirstTap();
     SFX.key();
     const rec = getCurrentRecord();
     rec.baseQty = rec.prevQty;
@@ -238,6 +244,7 @@ function copyPrevQty() {
 }
 
 function confirmAndNextRecord() {
+    unlockTtsOnFirstTap();
     const rec = getCurrentRecord();
     if (!rec) return;
     rec.counted = true;
@@ -255,10 +262,18 @@ function confirmAndNextRecord() {
     const nextRec = pool[(idx + 1) % pool.length];
     appState.selectedRecordId = nextRec.id;
     renderAllViews();
-    speakCurrentRecord(false, `${getRecordTotalQty(rec)}${rec.unit}で確定。次は、`);
+
+    const allDone = inventoryRecords.every(r => r.counted);
+    if (allDone) {
+        speakText(`${getRecordTotalQty(rec)}${rec.unit}で確定！全商品の棚卸しが完了しました！`);
+        showToast('🎉 全商品の棚卸し入力が完了しました！');
+    } else {
+        speakCurrentRecord(false, `${getRecordTotalQty(rec)}${rec.unit}で確定！次は、`);
+    }
 }
 
 function movePrevRecord() {
+    unlockTtsOnFirstTap();
     SFX.key();
     appState.inputBuffer = '';
     if (isCameraRunning) resumeCameraScan();
@@ -268,7 +283,7 @@ function movePrevRecord() {
     const prevRec = pool[(idx - 1 + pool.length) % pool.length];
     appState.selectedRecordId = prevRec.id;
     renderAllViews();
-    speakCurrentRecord(false, '戻ります。');
+    speakCurrentRecord(false, '前の商品に戻ります！');
 }
 
 function handleBarcodeScan(janCode) {
@@ -280,6 +295,7 @@ function handleBarcodeScan(janCode) {
     if (matches.length === 0) {
         SFX.err();
         showToast(`未登録JAN (${code}) です。新規商品登録を開きます`);
+        speakText('未登録のバーコードです。新規登録画面を開きます');
         openNewMasterModal(code);
         return;
     }
@@ -293,12 +309,12 @@ function handleBarcodeScan(janCode) {
     appState.selectedRecordId = curAreaMatch.id;
     appState.inputBuffer = '';
     renderAllViews();
+    speakCurrentRecord(false);
 
     if (curAreaMatch.counted || matches.length > 1) {
         openScanActionChoiceModal(code, matches);
     } else {
-        speakCurrentRecord(false);
-        showToast(`スキャン: ${curAreaMatch.name}`);
+        showToast(`スキャン読込: ${curAreaMatch.name}`);
     }
 }
 
@@ -319,7 +335,7 @@ function openScanActionChoiceModal(jan, matches) {
 
             <div class="font-bold text-slate-700 pt-2">📍 既存の棚を選択してカウント修正する：</div>
             ${matches.map(m => `
-                <button onclick="closeModal(); selectRecordById('${m.id}');" class="w-full bg-slate-50 hover:bg-blue-50 border border-slate-300 p-2.5 rounded-xl text-left flex justify-between items-center">
+                <button onclick="closeModal(); selectRecordById('${m.id}', true);" class="w-full bg-slate-50 hover:bg-blue-50 border border-slate-300 p-2.5 rounded-xl text-left flex justify-between items-center">
                     <span>${m.area} / ${m.shelf} / ${m.level}</span>
                     <span class="font-mono font-bold">現在: ${getRecordTotalQty(m)}${m.unit} (${m.counted ? '確定済' : '未'})</span>
                 </button>
@@ -453,6 +469,7 @@ function commitAddFoundStock(jan) {
     SFX.next();
     syncRecordToGasSheet(targetRec, newLog);
     renderAllViews();
+    speakText(`${area}、${shelf}に、${addedQty}${baseProduct.unit}を追加登録しました！`);
     showToast(`「${area}/${shelf}/${level}」に ＋${addedQty}${baseProduct.unit} を追加記録しました`);
 }
 
@@ -551,8 +568,10 @@ function saveNewRecordFromModal() {
 
     renderLocationFilters();
     closeModal();
+    if (isCameraRunning) resumeCameraScan();
     SFX.next();
     renderAllViews();
+    speakCurrentRecord(false, '新規商品を登録しました！');
     showToast(`「${name} (${area}/${shelf})」を登録しました`);
 }
 
