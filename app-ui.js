@@ -1,9 +1,9 @@
 /**
- * app-ui.js (v10)
- * ・進捗マップ / 異常値設定＆ハイライト / 棚上・棚下ロック / 部門別リアルタイム速報
- * ・追加発見ログ / 備考欄＋定型タグ / 削除・やり直し確認 / 2次元バーコード配布
- * ・元Excelの数式・書式を保持した完成版Excel自動生成 (ExcelJS)
- * ・コード全文コピー・ダウンロード付き完全バックアップ
+ * app-ui.js (v11)
+ * ・当日カウント画面 / 事前ピックアップ専用画面（音声なし） / PC管理画面の3画面完全分離
+ * ・進捗マップへの「今月金額 vs 先月金額・差額」比較表示
+ * ・担当者15名 ＆ 読み上げ辞書のセル入力テーブルUI
+ * ・元Excel数式保護流し込み生成 / 2次元バーコード配布 / コード全文バックアップ
  */
 
 window.addEventListener('DOMContentLoaded', async () => {
@@ -21,26 +21,62 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (getActiveGasUrl()) fetchAllFromGasApi(false);
 });
 
+// ==========================================================
+// 1. 3画面完全分離（当日カウント / 事前ピックアップ / PC管理）
+// ==========================================================
+function switchView(viewName) {
+    appState.currentView = viewName;
+
+    // ピックアップ画面またはPC管理画面へ移るときは音声を完全停止
+    if (viewName !== 'mobile') {
+        stopVoiceAll();
+    }
+
+    document.getElementById('mobile-view').classList.toggle('hidden', viewName !== 'mobile');
+    document.getElementById('pickup-view').classList.toggle('hidden', viewName !== 'pickup');
+    document.getElementById('admin-view').classList.toggle('hidden', viewName !== 'admin');
+    document.getElementById('mobile-nav-bar').classList.toggle('hidden', viewName === 'admin');
+
+    const btnM = document.getElementById('nav-btn-mobile');
+    const btnP = document.getElementById('nav-btn-pickup');
+    if (btnM && btnP) {
+        btnM.className = viewName === 'mobile'
+            ? 'flex-1 py-1.5 rounded-lg text-xs font-extrabold bg-blue-600 text-white shadow'
+            : 'flex-1 py-1.5 rounded-lg text-xs font-extrabold bg-slate-700 text-slate-300';
+        btnP.className = viewName === 'pickup'
+            ? 'flex-1 py-1.5 rounded-lg text-xs font-extrabold bg-amber-500 text-slate-950 shadow'
+            : 'flex-1 py-1.5 rounded-lg text-xs font-extrabold bg-slate-700 text-slate-300';
+    }
+
+    updateCameraContainersVisibility();
+    if (viewName === 'admin') {
+        loadSettingsToCellTables();
+        renderAdminDashboard();
+    } else {
+        renderMobileView();
+        renderPickupView();
+    }
+}
+
 function initSheetNoSelects() {
-    const mSel = document.getElementById('m-sheet-no');
-    const pSel = document.getElementById('pc-export-sheet-no');
     const names = masterData.sheetNames || {};
     let html = '';
     for (let i = 1; i <= 200; i++) {
         const label = names[String(i)] ? `No.${i} (${names[String(i)]})` : `用紙 No.${i}`;
         html += `<option value="${i}">${label}</option>`;
     }
-    mSel.innerHTML = html;
-    pSel.innerHTML = html;
-    mSel.value = appState.currentSheetNo;
-    pSel.value = appState.currentSheetNo;
+    ['m-sheet-no', 'p-sheet-no', 'pc-export-sheet-no'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) { el.innerHTML = html; el.value = appState.currentSheetNo; }
+    });
 }
 
 function renderWorkerSelect() {
     const sel = document.getElementById('worker-select');
-    sel.innerHTML = masterData.workers.map(w => `<option value="${w}">${w}</option>`).join('');
-    if (!masterData.workers.includes(appState.currentWorker) && masterData.workers.length > 0) {
-        appState.currentWorker = masterData.workers[0];
+    const valid = masterData.workers.filter(Boolean);
+    sel.innerHTML = valid.map(w => `<option value="${w}">${w}</option>`).join('');
+    if (!valid.includes(appState.currentWorker) && valid.length > 0) {
+        appState.currentWorker = valid[0];
     }
     sel.value = appState.currentWorker;
 }
@@ -52,14 +88,18 @@ function onWorkerChange(val) {
 
 function onSheetNoChange(val) {
     appState.currentSheetNo = Number(val) || 1;
+    ['m-sheet-no', 'p-sheet-no', 'pc-export-sheet-no'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.value = appState.currentSheetNo;
+    });
     const list = getCurrentSheetRecords();
     appState.selectedRecordId = list.length > 0 ? list[0].id : null;
     appState.inputBuffer = '';
     saveToLocalStorage();
     renderMobileView();
+    renderPickupView();
 }
 
-// 機能③：棚上専用 / 棚下専用 入力ロック切替
 function onFieldLockChange(val) {
     appState.fieldLock = val;
     applyFieldLockState();
@@ -89,25 +129,6 @@ function setActiveField(field) {
     renderMobileCard();
 }
 
-function setWorkMode(mode) {
-    appState.workMode = mode;
-    const btnC = document.getElementById('mode-btn-count');
-    const btnP = document.getElementById('mode-btn-pickup');
-    const card = document.getElementById('count-card-area');
-    const pad = document.getElementById('keypad-area');
-    if (mode === 'pickup') {
-        btnP.className = 'py-1 rounded-md bg-amber-500 text-slate-950 shadow';
-        btnC.className = 'py-1 rounded-md text-slate-600';
-        card.classList.add('hidden');
-        pad.classList.add('hidden');
-    } else {
-        btnC.className = 'py-1 rounded-md bg-blue-600 text-white shadow';
-        btnP.className = 'py-1 rounded-md text-slate-600';
-        card.classList.remove('hidden');
-        pad.classList.remove('hidden');
-    }
-}
-
 function getCurrentSheetRecords() {
     return inventoryRecords
         .filter(r => Number(r.sheetNo) === Number(appState.currentSheetNo))
@@ -120,7 +141,7 @@ function getCurrentRecord() {
 }
 
 // ==========================================================
-// 1. 異常値・先月比差異チェック（機能②・設定値連動）
+// 2. 異常値・差異チェック
 // ==========================================================
 function checkRecordAnomalies(r) {
     const cfg = masterData.alertSettings || defaultMaster.alertSettings;
@@ -139,25 +160,28 @@ function checkRecordAnomalies(r) {
             reasons.push(`先月${prevTot}→今回0/未`);
         } else if (total > 0) {
             const ratio = Math.max(total / prevTot, prevTot / total);
-            if (ratio >= (Number(cfg.prevRatio) || 2.0)) {
-                reasons.push(`先月比${ratio.toFixed(1)}倍`);
-            }
+            if (ratio >= (Number(cfg.prevRatio) || 2.0)) reasons.push(`先月比${ratio.toFixed(1)}倍`);
         }
     }
     return reasons;
 }
 
 // ==========================================================
-// 2. スキャン・手入力追加・やり直し・削除・備考・追加発見
+// 3. バーコードスキャン・手入力・やり直し・削除・備考・追加発見
 // ==========================================================
 function handleBarcodeScan(rawCode) {
     const jan = normalizeJan(rawCode);
     if (!jan) return;
-    document.getElementById('barcode-input').value = '';
+    const inpM = document.getElementById('barcode-input');
+    const inpP = document.getElementById('pickup-barcode-input');
+    if (inpM) inpM.value = '';
+    if (inpP) inpP.value = '';
     SFX.scan();
 
     const sheetList = getCurrentSheetRecords();
-    if (appState.workMode === 'count') {
+
+    // 当日カウント画面のとき：同じ用紙内に「未入力の同一JAN」があれば呼び出す
+    if (appState.currentView === 'mobile') {
         const uncountedHit = sheetList.find(r => normalizeJan(r.jan) === jan && r.status !== 'done');
         if (uncountedHit) {
             selectRecord(uncountedHit.id, true);
@@ -166,6 +190,7 @@ function handleBarcodeScan(rawCode) {
         }
     }
 
+    // 40行上限チェック
     if (sheetList.length >= 40) {
         SFX.err();
         alert(`用紙 No.${appState.currentSheetNo} は上限40行に達しています！次の用紙No.へ切り替えてください。`);
@@ -189,8 +214,17 @@ function handleBarcodeScan(rawCode) {
     saveToLocalStorage();
     postToGasApi({ action: 'saveRecord', record: newRec });
     renderAllViews();
-    speakCurrentRecord(false);
-    showToast(`➕ 行${sheetList.length + 1}に追加: ${newRec.name}`);
+
+    if (appState.currentView === 'pickup') {
+        const lastEl = document.getElementById('pickup-last-added');
+        if (lastEl) {
+            lastEl.innerHTML = `<span class="text-emerald-300 font-bold truncate">✅ 行${sheetList.length + 1} 追加: ${newRec.name}</span><span class="font-mono text-amber-300 shrink-0">¥${newRec.price}</span>`;
+        }
+        showToast(`➕ 行${sheetList.length + 1}: ${newRec.name}`);
+    } else {
+        speakCurrentRecord(false);
+        showToast(`➕ 行${sheetList.length + 1}に追加: ${newRec.name}`);
+    }
 }
 
 function resetCurrentRecord() {
@@ -211,15 +245,21 @@ function resetCurrentRecord() {
 function deleteCurrentRecord() {
     const rec = getCurrentRecord();
     if (!rec) return;
-    const list = getCurrentSheetRecords();
-    const rowNum = list.findIndex(r => r.id === rec.id) + 1;
-    if (!confirm(`本当に削除しますか？\n用紙 No.${rec.sheetNo} / ${rowNum}行目\n「${rec.name}」`)) return;
-    inventoryRecords = inventoryRecords.filter(r => r.id !== rec.id);
-    const nextList = getCurrentSheetRecords();
-    appState.selectedRecordId = nextList.length > 0 ? nextList[0].id : null;
-    appState.inputBuffer = '';
+    deleteRecordById(rec.id);
+}
+
+function deleteRecordById(id) {
+    const rec = inventoryRecords.find(r => r.id === id);
+    if (!rec) return;
+    if (!confirm(`本当に削除しますか？\n用紙 No.${rec.sheetNo}\n「${rec.name}」`)) return;
+    inventoryRecords = inventoryRecords.filter(r => r.id !== id);
+    if (appState.selectedRecordId === id) {
+        const nextList = getCurrentSheetRecords();
+        appState.selectedRecordId = nextList.length > 0 ? nextList[0].id : null;
+        appState.inputBuffer = '';
+    }
     saveToLocalStorage();
-    postToGasApi({ action: 'deleteRecord', id: rec.id });
+    postToGasApi({ action: 'deleteRecord', id });
     renderAllViews();
     showToast('🗑️ 商品行を削除しました');
 }
@@ -258,7 +298,7 @@ function openAddFoundStockModal() {
     const rec = getCurrentRecord();
     if (!rec) return;
     openModal(`➕ 追加発見の登録：${rec.name}`, `
-        <p class="text-xs text-slate-600">現在のカウント（棚上:${rec.qtyUpper ?? 0} / 棚下:${rec.qtyLower ?? 0}）に、後から見つかった在庫を履歴付きで加算します。</p>
+        <p class="text-xs text-slate-600">現在のカウント（棚上:${rec.qtyUpper ?? 0} / 棚下:${rec.qtyLower ?? 0}）に後から見つかった在庫を履歴付きで加算します。</p>
         <div class="grid grid-cols-2 gap-2">
             <div>
                 <label class="font-bold text-xs block mb-1">反映先</label>
@@ -302,11 +342,7 @@ function commitAddFoundStock() {
         worker: appState.currentWorker,
         recordId: rec.id,
         sheetNo: rec.sheetNo,
-        jan: rec.jan,
-        name: rec.name,
-        targetField: field,
-        addedQty: qty,
-        memo: memo
+        jan: rec.jan, name: rec.name, targetField: field, addedQty: qty, memo
     };
     addStockLogs.unshift(log);
     saveToLocalStorage();
@@ -394,7 +430,7 @@ function saveManualProduct() {
     inventoryRecords.push(newRec);
     appState.currentSheetNo = sheetNo;
     appState.selectedRecordId = newRec.id;
-    document.getElementById('m-sheet-no').value = sheetNo;
+    initSheetNoSelects();
     saveToLocalStorage();
     postToGasApi({ action: 'saveRecord', record: newRec });
     closeModal();
@@ -425,7 +461,7 @@ function saveSheetName() {
 }
 
 // ==========================================================
-// 3. テンキー操作・確定
+// 4. テンキー操作・確定
 // ==========================================================
 function pressNumKey(digit) {
     SFX.key();
@@ -496,7 +532,7 @@ function confirmAndNextRecord() {
         selectRecord(list[idx + 1].id, true);
     } else {
         renderAllViews();
-        speakText(`用紙${appState.currentSheetNo}番の最終行まで完了しました！`);
+        speakText(`用紙${appState.currentSheetNo}番、完了`);
         showToast(`✅ 用紙 No.${appState.currentSheetNo} の最終行まで完了しました`);
     }
 }
@@ -511,14 +547,15 @@ function selectRecord(id, autoSpeak = false) {
     appState.selectedRecordId = id;
     applyFieldLockState();
     renderMobileView();
-    if (autoSpeak) speakCurrentRecord(false);
+    if (autoSpeak && appState.currentView === 'mobile') speakCurrentRecord(false);
 }
 
 // ==========================================================
-// 4. スマホ画面描画 ＆ 進捗マップモーダル（機能①）
+// 5. 画面描画（当日カウント / ピックアップ専用 / 進捗金額比較マップ）
 // ==========================================================
 function renderAllViews() {
     renderMobileView();
+    renderPickupView();
     if (appState.isAdminUnlocked) renderAdminDashboard();
 }
 
@@ -600,6 +637,30 @@ function renderMobileList() {
     }).join('');
 }
 
+function renderPickupView() {
+    const list = getCurrentSheetRecords();
+    const badge = document.getElementById('p-sheet-count-badge');
+    if (badge) badge.textContent = `${list.length} / 40行`;
+    const container = document.getElementById('p-inventory-list');
+    if (!container) return;
+    if (list.length === 0) {
+        container.innerHTML = `<div class="p-6 text-center text-slate-400">まだ商品がありません。カメラで連続スキャンしてください。</div>`;
+        return;
+    }
+    container.innerHTML = list.map((r, idx) => `
+        <div class="p-2 flex items-center justify-between gap-2 hover:bg-slate-50">
+            <div class="min-w-0 flex-1">
+                <div class="font-bold text-slate-800 truncate">${idx + 1}. ${r.name}</div>
+                <div class="text-[10px] text-slate-500 font-mono">JAN:${r.jan || '-'} | 上代:¥${r.price}</div>
+            </div>
+            <button onclick="deleteRecordById('${r.id}')" class="bg-rose-100 text-rose-700 font-bold text-[11px] px-2 py-1 rounded-lg shrink-0">削除</button>
+        </div>
+    `).join('');
+}
+
+/**
+ * 進捗マップ（今月金額 vs 先月金額・差額を比較表示）
+ */
 function buildProgressMapHtml(clickHandlerName) {
     const bySheet = new Map();
     inventoryRecords.forEach(r => {
@@ -616,60 +677,64 @@ function buildProgressMapHtml(clickHandlerName) {
         const hasMemo = list.some(r => r.memo);
         const lastWorker = list.find(r => r.worker)?.worker || '';
 
+        let curAmt = 0, prevAmt = 0;
+        list.forEach(r => {
+            const p = Number(r.price) || 0;
+            curAmt += ((Number(r.qtyUpper) || 0) + (Number(r.qtyLower) || 0)) * p;
+            prevAmt += ((Number(r.prevUpper) || 0) + (Number(r.prevLower) || 0)) * p;
+        });
+        const diff = curAmt - prevAmt;
+        const diffStr = diff > 0 ? `+¥${diff.toLocaleString()}` : diff < 0 ? `-¥${Math.abs(diff).toLocaleString()}` : '±¥0';
+        const diffColor = diff > 0 ? 'text-blue-700' : diff < 0 ? 'text-rose-700' : 'text-slate-500';
+
         let bg = 'bg-slate-50 border-slate-200 text-slate-400';
-        if (total > 0 && done === total) bg = 'bg-emerald-100 border-emerald-500 text-emerald-900';
-        else if (done > 0 || partial > 0) bg = 'bg-amber-100 border-amber-400 text-amber-900';
-        else if (total > 0) bg = 'bg-white border-slate-300 text-slate-700';
+        if (total > 0 && done === total) bg = 'bg-emerald-100 border-emerald-500 text-emerald-950';
+        else if (done > 0 || partial > 0) bg = 'bg-amber-100 border-amber-400 text-amber-950';
+        else if (total > 0) bg = 'bg-white border-slate-300 text-slate-800';
 
         const memoBorder = hasMemo ? 'ring-2 ring-rose-500' : '';
         const areaName = (masterData.sheetNames && masterData.sheetNames[String(i)]) || '';
 
         html += `
-        <button onclick="${clickHandlerName}(${i})" class="p-1.5 rounded-lg border text-left text-[10px] leading-tight ${bg} ${memoBorder}">
-            <div class="font-extrabold">No.${i}</div>
-            <div class="truncate text-[9px]">${areaName || (total > 0 ? `${done}/${total}行` : '-')}</div>
-            <div class="truncate text-[9px] font-bold">${lastWorker ? lastWorker.split(':')[1] || lastWorker : ''}</div>
+        <button onclick="${clickHandlerName}(${i})" class="p-2 rounded-xl border text-left text-[10px] leading-snug ${bg} ${memoBorder}">
+            <div class="flex justify-between items-center font-extrabold">
+                <span>No.${i}</span>
+                <span class="text-[9px]">${total > 0 ? `${done}/${total}` : '-'}</span>
+            </div>
+            ${areaName ? `<div class="truncate text-[9px] font-bold text-indigo-800">${areaName}</div>` : ''}
+            ${total > 0 ? `
+            <div class="mt-1 font-mono text-[10px] font-bold">今:¥${curAmt.toLocaleString()}</div>
+            <div class="font-mono text-[9px] text-slate-600">先:¥${prevAmt.toLocaleString()}</div>
+            <div class="font-mono text-[9px] font-bold ${diffColor}">差:${diffStr}</div>
+            ` : `<div class="mt-1 text-[9px]">未使用</div>`}
+            ${lastWorker ? `<div class="truncate text-[9px] text-slate-500 mt-0.5">${lastWorker.split(':')[1] || lastWorker}</div>` : ''}
         </button>`;
     }
     return html;
 }
 
 function openSheetProgressMapModal() {
-    openModal('🗺️ 用紙 No.1〜200 進捗マップ', `
-        <p class="text-[11px] text-slate-600">緑＝完了 / 黄＝作業中 / 白＝未着手 / 赤枠＝備考あり。タップでその用紙へ移動します。</p>
-        <div class="grid grid-cols-4 sm:grid-cols-5 gap-1.5 max-h-[60vh] overflow-y-auto">${buildProgressMapHtml('jumpToSheetFromModal')}</div>
+    openModal('🗺️ 用紙進捗 ＆ 金額比較マップ', `
+        <p class="text-[11px] text-slate-600">今月金額・先月金額・差額を確認できます。タップでその用紙へ移動します。</p>
+        <div class="grid grid-cols-2 sm:grid-cols-3 gap-1.5 max-h-[62vh] overflow-y-auto">${buildProgressMapHtml('jumpToSheetFromModal')}</div>
     `);
 }
 
 function jumpToSheetFromModal(no) {
-    document.getElementById('m-sheet-no').value = no;
     onSheetNoChange(no);
     closeModal();
 }
 
 // ==========================================================
-// 5. PC管理画面・部門別速報・異常値・Excel自動生成
+// 6. PC管理画面・セル形式設定（担当者・読み上げ辞書）
 // ==========================================================
 function requestAdminView() {
-    if (appState.isAdminUnlocked) return switchToAdminView();
+    if (appState.isAdminUnlocked) return switchView('admin');
     const pin = prompt('管理者PINコードを入力してください（初期値: 1234）');
     if (pin === masterData.adminPin) {
         appState.isAdminUnlocked = true;
-        switchToAdminView();
+        switchView('admin');
     } else if (pin !== null) alert('PINコードが違います');
-}
-
-function switchToAdminView() {
-    document.getElementById('mobile-view').classList.add('hidden');
-    document.getElementById('admin-view').classList.remove('hidden');
-    loadSettingsToInputs();
-    renderAdminDashboard();
-}
-
-function switchToMobileView() {
-    document.getElementById('admin-view').classList.add('hidden');
-    document.getElementById('mobile-view').classList.remove('hidden');
-    renderMobileView();
 }
 
 function switchAdminTab(tabId) {
@@ -682,6 +747,9 @@ function switchAdminTab(tabId) {
     });
     if (tabId === 'tab-map') {
         document.getElementById('pc-progress-map-grid').innerHTML = buildProgressMapHtml('jumpToSheetInAdmin');
+    }
+    if (tabId === 'tab-settings') {
+        loadSettingsToCellTables();
     }
 }
 
@@ -726,7 +794,6 @@ function renderAdminDashboard() {
 function renderAdminExportTable() {
     const mode = document.getElementById('pc-filter-mode').value;
     const sheetNo = Number(document.getElementById('pc-export-sheet-no').value) || 1;
-
     let list = [...inventoryRecords].sort((a, b) => (a.sheetNo - b.sheetNo) || (a.rowOrder - b.rowOrder));
     if (mode === 'sheet') list = list.filter(r => Number(r.sheetNo) === sheetNo);
     else if (mode === 'anomaly') list = list.filter(r => checkRecordAnomalies(r).length > 0);
@@ -784,15 +851,116 @@ function renderAdminAddLogsTable() {
     `).join('');
 }
 
-function deleteRecordById(id) {
-    const rec = inventoryRecords.find(r => r.id === id);
-    if (!confirm(`「${rec ? rec.name : id}」を削除しますか？`)) return;
-    inventoryRecords = inventoryRecords.filter(r => r.id !== id);
-    saveToLocalStorage();
-    postToGasApi({ action: 'deleteRecord', id });
-    renderAllViews();
+// セル形式UI：担当者15名 ＆ 読み上げ辞書
+function loadSettingsToCellTables() {
+    const cfg = masterData.alertSettings || defaultMaster.alertSettings;
+    document.getElementById('set-alert-qty').value = cfg.maxQty;
+    document.getElementById('set-alert-amt').value = cfg.maxAmount;
+    document.getElementById('set-alert-ratio').value = cfg.prevRatio;
+    document.getElementById('set-alert-zero').checked = Boolean(cfg.warnZeroFromPrev);
+    document.getElementById('mst-admin-pin').value = masterData.adminPin;
+
+    renderWorkersCellTable();
+    renderDictCellTable();
 }
 
+function renderWorkersCellTable() {
+    const tbody = document.getElementById('workers-cell-tbody');
+    let html = '';
+    for (let i = 0; i < 15; i++) {
+        const val = (masterData.workers && masterData.workers[i]) ? masterData.workers[i] : '';
+        html += `
+        <tr>
+            <td class="p-1 text-center font-mono text-slate-500 bg-slate-50 border-r">${i + 1}</td>
+            <td class="p-0"><input type="text" class="worker-cell-input w-full px-2 py-1.5 outline-none focus:bg-blue-50" value="${val}" placeholder="担当者名を入力"></td>
+        </tr>`;
+    }
+    tbody.innerHTML = html;
+}
+
+function saveWorkersFromCells() {
+    const inputs = document.querySelectorAll('.worker-cell-input');
+    const list = [];
+    inputs.forEach(inp => {
+        const v = inp.value.trim();
+        if (v) list.push(v);
+    });
+    if (list.length === 0) return alert('担当者を1名以上入力してください');
+    masterData.workers = list;
+    saveToLocalStorage();
+    postToGasApi({ action: 'saveMaster', masterData });
+    renderWorkerSelect();
+    showToast(`✅ 担当者 ${list.length}名を保存しました（シート連動済）`);
+}
+
+function renderDictCellTable() {
+    const tbody = document.getElementById('dict-cell-tbody');
+    if (readingDict.length === 0) readingDict.push(['', '']);
+    tbody.innerHTML = readingDict.map((pair, idx) => `
+        <tr>
+            <td class="p-0 border-r"><input type="text" class="dict-k-input w-full px-2 py-1.5 outline-none focus:bg-indigo-50" value="${pair[0] || ''}" placeholder="例：紅花"></td>
+            <td class="p-0 border-r"><input type="text" class="dict-v-input w-full px-2 py-1.5 outline-none focus:bg-indigo-50" value="${pair[1] || ''}" placeholder="例：べにばな"></td>
+            <td class="p-1 text-center"><button onclick="removeDictRow(${idx})" class="text-rose-600 font-bold px-1">×</button></td>
+        </tr>
+    `).join('');
+}
+
+function addDictRow() {
+    syncDictFromDom();
+    readingDict.push(['', '']);
+    renderDictCellTable();
+}
+
+function removeDictRow(idx) {
+    syncDictFromDom();
+    readingDict.splice(idx, 1);
+    renderDictCellTable();
+}
+
+function syncDictFromDom() {
+    const ks = document.querySelectorAll('.dict-k-input');
+    const vs = document.querySelectorAll('.dict-v-input');
+    const next = [];
+    for (let i = 0; i < ks.length; i++) {
+        next.push([ks[i].value.trim(), vs[i].value.trim()]);
+    }
+    readingDict = next;
+}
+
+function saveReadingDictFromCells() {
+    syncDictFromDom();
+    readingDict = readingDict.filter(p => p[0] && p[1]);
+    saveToLocalStorage();
+    postToGasApi({ action: 'saveReadingDict', readingDict });
+    renderDictCellTable();
+    showToast(`✅ 読み上げ辞書（${readingDict.length}語）を保存しました`);
+}
+
+function saveAlertSettings() {
+    masterData.alertSettings = {
+        maxQty: Number(document.getElementById('set-alert-qty').value) || 100,
+        maxAmount: Number(document.getElementById('set-alert-amt').value) || 50000,
+        prevRatio: Number(document.getElementById('set-alert-ratio').value) || 2.0,
+        warnZeroFromPrev: document.getElementById('set-alert-zero').checked
+    };
+    saveToLocalStorage();
+    postToGasApi({ action: 'saveMaster', masterData });
+    renderAdminDashboard();
+    showToast('✅ 異常値・差異アラート設定を保存しました');
+}
+
+function updateAdminPin() {
+    const pin = document.getElementById('mst-admin-pin').value.trim();
+    if (!pin) return;
+    masterData.adminPin = pin;
+    saveToLocalStorage();
+    postToGasApi({ action: 'saveMaster', masterData });
+    showToast('✅ 管理者PINを変更しました');
+}
+
+// ==========================================================
+// 7. Excel貼付コピー / 投げ込み取込 / 完成版Excel自動生成
+// ==========================================================
 function copyExcelColumnA() {
     const sheetNo = Number(document.getElementById('pc-export-sheet-no').value) || 1;
     const list = inventoryRecords.filter(r => Number(r.sheetNo) === sheetNo).sort((a, b) => (a.rowOrder || 0) - (b.rowOrder || 0));
@@ -818,9 +986,6 @@ function downloadAllCsv() {
     a.click();
 }
 
-// ==========================================================
-// 6. Excel投げ込み読込 ＆ 元Excelへの数式保護自動流し込み生成（ExcelJS）
-// ==========================================================
 function setupExcelDropZones() {
     const bindZone = (zoneId, inputId, handler) => {
         const zone = document.getElementById(zoneId);
@@ -949,7 +1114,6 @@ async function generateFilledExcelFromTemplate(file) {
         const ws = workbook.worksheets.find(s => s.name.includes('棚卸し表'));
         if (!ws) throw new Error('「棚卸し表」シートが見つかりません');
 
-        // 用紙No.ごとにグルーピング
         const bySheet = new Map();
         inventoryRecords.forEach(r => {
             const n = Number(r.sheetNo) || 1;
@@ -959,18 +1123,17 @@ async function generateFilledExcelFromTemplate(file) {
 
         let writtenRows = 0;
         for (let sheetNo = 1; sheetNo <= 200; sheetNo++) {
-            const blockDataStart = (sheetNo - 1) * 47 + 7; // Excel行番号(1始まり)
+            const blockDataStart = (sheetNo - 1) * 47 + 7;
             const list = (bySheet.get(sheetNo) || []).sort((a, b) => (a.rowOrder || 0) - (b.rowOrder || 0));
 
             for (let i = 0; i < 40; i++) {
-                const rowIdx = blockDataStart + i;
-                const row = ws.getRow(rowIdx);
+                const row = ws.getRow(blockDataStart + i);
                 const rec = list[i];
                 if (rec) {
                     const janVal = /^\d{1,15}$/.test(rec.jan) ? Number(rec.jan) : rec.jan;
-                    row.getCell(1).value = janVal || null;                           // A列: JANコード
-                    row.getCell(10).value = rec.qtyUpper === null ? null : Number(rec.qtyUpper); // J列: 棚上
-                    row.getCell(11).value = rec.qtyLower === null ? null : Number(rec.qtyLower); // K列: 棚下
+                    row.getCell(1).value = janVal || null;
+                    row.getCell(10).value = rec.qtyUpper === null ? null : Number(rec.qtyUpper);
+                    row.getCell(11).value = rec.qtyLower === null ? null : Number(rec.qtyLower);
                     writtenRows++;
                 } else {
                     row.getCell(1).value = null;
@@ -981,9 +1144,8 @@ async function generateFilledExcelFromTemplate(file) {
         }
 
         const outBuffer = await workbook.xlsx.writeBuffer();
-        const blob = new Blob([outBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
         const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
+        a.href = URL.createObjectURL(new Blob([outBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
         a.download = `完成版_棚卸表_道の駅おけがわ_${new Date().toISOString().slice(0, 10)}.xlsx`;
         a.click();
 
@@ -994,64 +1156,8 @@ async function generateFilledExcelFromTemplate(file) {
 }
 
 // ==========================================================
-// 7. 設定保存・QR配布・完全バックアップ（コード全文出力含む）
+// 8. 接続QRモーダル ＆ コード全文バックアップモーダル
 // ==========================================================
-function loadSettingsToInputs() {
-    const cfg = masterData.alertSettings || defaultMaster.alertSettings;
-    document.getElementById('set-alert-qty').value = cfg.maxQty;
-    document.getElementById('set-alert-amt').value = cfg.maxAmount;
-    document.getElementById('set-alert-ratio').value = cfg.prevRatio;
-    document.getElementById('set-alert-zero').checked = Boolean(cfg.warnZeroFromPrev);
-    document.getElementById('mst-workers-input').value = masterData.workers.join(', ');
-    document.getElementById('mst-admin-pin').value = masterData.adminPin;
-    document.getElementById('mst-dict-input').value = readingDict.map(p => `${p[0]},${p[1]}`).join('\n');
-}
-
-function saveAlertSettings() {
-    masterData.alertSettings = {
-        maxQty: Number(document.getElementById('set-alert-qty').value) || 100,
-        maxAmount: Number(document.getElementById('set-alert-amt').value) || 50000,
-        prevRatio: Number(document.getElementById('set-alert-ratio').value) || 2.0,
-        warnZeroFromPrev: document.getElementById('set-alert-zero').checked
-    };
-    saveToLocalStorage();
-    postToGasApi({ action: 'saveMaster', masterData });
-    renderAdminDashboard();
-    showToast('✅ 異常値・差異アラート設定を保存しました');
-}
-
-function saveWorkersList() {
-    const list = document.getElementById('mst-workers-input').value.split(/,|、|\n/).map(s => s.trim()).filter(Boolean).slice(0, 15);
-    if (!list.length) return;
-    masterData.workers = list;
-    saveToLocalStorage();
-    postToGasApi({ action: 'saveMaster', masterData });
-    renderWorkerSelect();
-    showToast('✅ 担当者リストを保存しました（スプレッドシートへも反映）');
-}
-
-function updateAdminPin() {
-    const pin = document.getElementById('mst-admin-pin').value.trim();
-    if (!pin) return;
-    masterData.adminPin = pin;
-    saveToLocalStorage();
-    postToGasApi({ action: 'saveMaster', masterData });
-    showToast('✅ 管理者PINを変更しました');
-}
-
-function saveReadingDictFromUi() {
-    const lines = document.getElementById('mst-dict-input').value.split('\n');
-    const nextDict = [];
-    for (const line of lines) {
-        const parts = line.split(/,|、/).map(s => s.trim());
-        if (parts[0] && parts[1]) nextDict.push([parts[0], parts[1]]);
-    }
-    readingDict = nextDict;
-    saveToLocalStorage();
-    postToGasApi({ action: 'saveReadingDict', readingDict });
-    showToast(`✅ 読み上げ辞書（${readingDict.length}語）を保存しました`);
-}
-
 function openGasUrlModal() {
     const curUrl = getActiveGasUrl();
     const baseUrl = window.location.origin + window.location.pathname;
@@ -1095,8 +1201,8 @@ function copyShareUrlText(url) {
 async function buildFullSourceBundleText() {
     const htmlContent = document.documentElement.outerHTML;
     let coreJs = '', uiJs = '';
-    try { const r1 = await fetch('app-core.js?v=10'); if (r1.ok) coreJs = await r1.text(); } catch (e) {}
-    try { const r2 = await fetch('app-ui.js?v=10'); if (r2.ok) uiJs = await r2.text(); } catch (e) {}
+    try { const r1 = await fetch('app-core.js?v=11'); if (r1.ok) coreJs = await r1.text(); } catch (e) {}
+    try { const r2 = await fetch('app-ui.js?v=11'); if (r2.ok) uiJs = await r2.text(); } catch (e) {}
     if (coreJs && uiJs) {
         return `<!-- ===== index.html ===== -->\n<!DOCTYPE html>\n${htmlContent}\n\n/* ===== app-core.js ===== */\n${coreJs}\n\n/* ===== app-ui.js ===== */\n${uiJs}`;
     }
@@ -1150,7 +1256,7 @@ async function downloadAppSourceCode() {
     document.getElementById('backup-textarea').value = code;
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([code], { type: 'text/html;charset=utf-8;' }));
-    a.download = `okegawa_inventory_app_code_${new Date().toISOString().slice(0, 10)}.html`;
+    a.download = `okegawa_inventory_app_code_v11_${new Date().toISOString().slice(0, 10)}.html`;
     a.click();
     showToast('💾 コードファイルをダウンロードしました');
 }
@@ -1172,6 +1278,7 @@ function restoreFromBackupJson() {
 }
 
 function openModal(title, html) {
+    appState.isModalOpen = true;
     document.getElementById('modal-title').textContent = title;
     document.getElementById('modal-body').innerHTML = html;
     document.getElementById('modal-overlay').classList.remove('hidden');
@@ -1179,6 +1286,7 @@ function openModal(title, html) {
 }
 
 function closeModal() {
+    appState.isModalOpen = false;
     document.getElementById('modal-overlay').classList.add('hidden');
     document.getElementById('modal-overlay').classList.remove('flex');
 }
