@@ -1,5 +1,5 @@
 /**
- * app-ui.js (v5)
+ * app-ui.js (v6)
  * ・モーダルを閉じた際のカメラモード自動復帰対応
  * ・UIの「⚙️接続」ボタンからGASのURLを後から安全に登録・保存・共有リンク生成する機能
  * ・スマホ上部テンキー操作・後から発見した在庫の追加履歴管理・PC管理者ダッシュボード・完全バックアップ機能
@@ -345,10 +345,10 @@ function confirmAndNextRecord() {
 
     const allDone = inventoryRecords.every(r => r.counted);
     if (allDone) {
-        speakText(`${getRecordTotalQty(rec)}${rec.unit}で確定！全商品の棚卸しが完了しました！`);
+        speakText(`${getRecordTotalQty(rec)}${rec.unit}、確定！全完了しました！`);
         showToast('🎉 全商品の棚卸し入力が完了しました！');
     } else {
-        speakCurrentRecord(false, `${getRecordTotalQty(rec)}${rec.unit}で確定！次は、`);
+        speakCurrentRecord(false, `${getRecordTotalQty(rec)}${rec.unit}確定。次、`);
     }
 }
 
@@ -362,7 +362,7 @@ function movePrevRecord() {
     const prevRec = pool[(idx - 1 + pool.length) % pool.length];
     appState.selectedRecordId = prevRec.id;
     renderAllViews();
-    speakCurrentRecord(false, '前の商品に戻ります！');
+    speakCurrentRecord(false, '前へ。');
 }
 
 function handleBarcodeScan(janCode) {
@@ -374,7 +374,7 @@ function handleBarcodeScan(janCode) {
     if (matches.length === 0) {
         SFX.err();
         showToast(`未登録JAN (${code}) です。新規商品登録を開きます`);
-        speakText('未登録のバーコードです。新規登録を開きます');
+        speakText('未登録のJANコードです');
         openNewMasterModal(code);
         return;
     }
@@ -548,7 +548,7 @@ function commitAddFoundStock(jan) {
     SFX.next();
     syncRecordToGasSheet(targetRec, newLog);
     renderAllViews();
-    speakText(`${area}、${shelf}に、${addedQty}${baseProduct.unit}を追加しました！`);
+    speakText(`${addedQty}${baseProduct.unit}追加しました！`);
     showToast(`「${area}/${shelf}/${level}」に ＋${addedQty}${baseProduct.unit} を追加記録しました`);
 }
 
@@ -649,7 +649,7 @@ function saveNewRecordFromModal() {
     closeModal();
     SFX.next();
     renderAllViews();
-    speakCurrentRecord(false, '新規商品を登録しました！');
+    speakCurrentRecord(false, '新規登録！');
     showToast(`「${name} (${area}/${shelf})」を登録しました`);
 }
 
@@ -991,11 +991,11 @@ async function buildFullSourceBundleText() {
     let coreJs = '';
     let uiJs = '';
     try {
-        const r1 = await fetch('app-core.js?v=5');
+        const r1 = await fetch('app-core.js?v=6');
         if (r1.ok) coreJs = await r1.text();
     } catch (e) {}
     try {
-        const r2 = await fetch('app-ui.js?v=5');
+        const r2 = await fetch('app-ui.js?v=6');
         if (r2.ok) uiJs = await r2.text();
     } catch (e) {}
 
@@ -1120,9 +1120,6 @@ function openModal() {
     el.classList.add('flex');
 }
 
-/**
- * モーダルを閉じた際、カメラが起動中であれば自動的にスキャン待機（緑枠）モードへ復帰
- */
 function closeModal() {
     const el = document.getElementById('modal-overlay');
     el.classList.add('hidden');
