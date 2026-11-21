@@ -1,5 +1,6 @@
 /**
- * app-ui.js (v4)
+ * app-ui.js (v5)
+ * ・モーダルを閉じた際のカメラモード自動復帰対応
  * ・UIの「⚙️接続」ボタンからGASのURLを後から安全に登録・保存・共有リンク生成する機能
  * ・スマホ上部テンキー操作・後から発見した在庫の追加履歴管理・PC管理者ダッシュボード・完全バックアップ機能
  */
@@ -16,9 +17,6 @@ window.addEventListener('DOMContentLoaded', () => {
     }
 });
 
-/**
- * 左上の「⚙️接続」ボタンからいつでも開けるGAS URL設定＆スタッフ共有リンク発行モーダル
- */
 function openGasConfigModal() {
     SFX.key();
     const currentUrl = getActiveGasUrl();
@@ -32,7 +30,7 @@ function openGasConfigModal() {
                     ${isConnected ? '✅ 現在GAS URLが設定されています（この端末のみに安全に保存）' : '⚠️ GASのURLがまだ設定されていません'}
                 </div>
                 <p class="text-[11px] text-slate-600">
-                    公開コード内にURLを書かずに、この画面から入力することであなたのスマホ・PCのブラウザ内部だけに安全に記憶されます。
+                    ※GASの「デプロイを管理」で「アクセスできるユーザー：<b>全員</b>」、URL末尾が <b>/exec</b> になっていることをご確認ください。
                 </p>
             </div>
 
@@ -55,7 +53,7 @@ function openGasConfigModal() {
             <div class="border-t pt-3 space-y-1.5">
                 <label class="font-bold text-slate-700 block text-xs">👥 他の作業スタッフ（最大15名）のスマホへ設定を配る：</label>
                 <p class="text-[11px] text-slate-500">
-                    下のボタンを押すと、GASのURLが自動セットされる配布用リンクをコピーできます。LINEやメールでスタッフに送って開いてもらうだけで設定が完了します（開いた直後にアドレスバーからGASのURLは自動で隠れます）。
+                    下のボタンを押すと、GASのURLが自動セットされる配布用リンクをコピーできます。LINEやメールでスタッフに送って開いてもらうだけで設定が完了します。
                 </p>
                 <button onclick="copyStaffShareLink()" class="w-full bg-slate-800 hover:bg-slate-700 text-amber-300 font-bold py-2.5 px-3 rounded-xl text-xs">
                     📋 スタッフ配布用リンク（GAS自動設定付き）をコピー
@@ -649,7 +647,6 @@ function saveNewRecordFromModal() {
 
     renderLocationFilters();
     closeModal();
-    if (isCameraRunning) resumeCameraScan();
     SFX.next();
     renderAllViews();
     speakCurrentRecord(false, '新規商品を登録しました！');
@@ -994,11 +991,11 @@ async function buildFullSourceBundleText() {
     let coreJs = '';
     let uiJs = '';
     try {
-        const r1 = await fetch('app-core.js?v=4');
+        const r1 = await fetch('app-core.js?v=5');
         if (r1.ok) coreJs = await r1.text();
     } catch (e) {}
     try {
-        const r2 = await fetch('app-ui.js?v=4');
+        const r2 = await fetch('app-ui.js?v=5');
         if (r2.ok) uiJs = await r2.text();
     } catch (e) {}
 
@@ -1010,7 +1007,6 @@ async function buildFullSourceBundleText() {
 
 function openBackupModal() {
     SFX.key();
-    // バックアップ出力時にもGASのURLが不用意に外へ出ないよう、必要データのみ整形
     const safeMaster = Object.assign({}, masterData, { gasWebhookUrl: '' });
     const fullStateJson = JSON.stringify({
         exportedAt: formatNow(),
@@ -1124,10 +1120,16 @@ function openModal() {
     el.classList.add('flex');
 }
 
+/**
+ * モーダルを閉じた際、カメラが起動中であれば自動的にスキャン待機（緑枠）モードへ復帰
+ */
 function closeModal() {
     const el = document.getElementById('modal-overlay');
     el.classList.add('hidden');
     el.classList.remove('flex');
+    if (typeof isCameraRunning !== 'undefined' && isCameraRunning && isScanPaused) {
+        resumeCameraScan();
+    }
 }
 
 let toastTimer = null;
@@ -1136,5 +1138,5 @@ function showToast(msg) {
     box.textContent = msg;
     box.classList.remove('hidden');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => box.classList.add('hidden'), 3000);
+    toastTimer = setTimeout(() => box.classList.add('hidden'), 4000);
 }
