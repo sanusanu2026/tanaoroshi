@@ -1,18 +1,17 @@
 /**
- * app-core.js
- * ・サンプル(teraoka (1).html)で実証済みの全方向カメラスキャンエンジン(コントラスト強調・520px・0/90度交互解析)を100%完全移植
- * ・明るくハキハキした音声読み上げ(pitch=1.22 / rate=1.16 + 日本語女性ボイス優先選択 + 初回タップ自動アンロック)
- * ・iOS Safari / Android Chrome 両対応の連続音声認識＆日本語数字変換エンジン
+ * app-core.js (v4)
+ * ・公開コード内にGASのURLを一切持たず、UIの設定モーダル(localStorage)またはURLパラメータ(?gas=...)から安全に読み込む設計
+ * ・明るい声の音声読み上げ(voice強制指定を廃止しスマホ無音バグを解消、pitch=1.25 / rate=1.15)
+ * ・読み上げ途中の声掛け(割り込みコマンド)対応：読み上げ中もマイクを止めず、ユーザー発話検知で即座に読み上げを中断して反応
+ * ・全方向バーコードスキャン(コントラスト強調Quagga2 + ネイティブBarcodeDetectorハイブリッド + 稼働モニター表示)
  */
 
-// ★ステップ1でデプロイしたGASウェブアプリのURL（https://script.google.com/macros/s/XXXX/exec）をここに貼り付けてください
-const DEFAULT_GAS_API_URL = 'https://script.google.com/a/macros/ttc-gr.co.jp/s/AKfycbzgpH2_jLWeUel0gOOyebZOOmG9n9Zv7iWNAIUJFUa_dOD0AuSTn8vQPIc3YVASFm5jGg/exec';
-
-const STORAGE_KEY = 'smart_inventory_solution_b_v2';
+const STORAGE_KEY = 'smart_inventory_solution_b_v4';
+const GAS_URL_STORAGE_KEY = 'smart_inventory_gas_api_url_v4';
 
 const defaultMaster = {
     adminPin: '1234',
-    gasWebhookUrl: DEFAULT_GAS_API_URL,
+    gasWebhookUrl: '',
     units: ['個', '箱', 'ケース', '本', '袋', 'パック', 'セット', 'kg', 'g', 'L'],
     areas: ['1F売場', '冷蔵・日配', '日用品コーナー', 'バックヤード', '2F倉庫'],
     shelves: ['棚A-01', '棚A-02', '棚B-01', '棚C-01', '棚Z-01'],
@@ -111,8 +110,33 @@ const appState = {
     ttsOn: true
 };
 
+/**
+ * URLパラメータ(?gas=...)で共有リンクが開かれた場合、端末のlocalStorageへ保存してアドレスバーからURLを隠す
+ */
+function checkUrlQueryForGasConfig() {
+    try {
+        const params = new URLSearchParams(window.location.search);
+        const gasParam = params.get('gas');
+        if (gasParam && gasParam.startsWith('https://script.google.com/')) {
+            localStorage.setItem(GAS_URL_STORAGE_KEY, gasParam.trim());
+            masterData.gasWebhookUrl = gasParam.trim();
+            // アドレスバーから ?gas=... を消去して画面をすっきり＆安全に保つ
+            const cleanUrl = window.location.origin + window.location.pathname;
+            window.history.replaceState({}, document.title, cleanUrl);
+        }
+    } catch (e) {}
+}
+
 function getActiveGasUrl() {
-    return (masterData.gasWebhookUrl || DEFAULT_GAS_API_URL || '').trim();
+    const dedicated = localStorage.getItem(GAS_URL_STORAGE_KEY);
+    return (dedicated || masterData.gasWebhookUrl || '').trim();
+}
+
+function setActiveGasUrl(newUrl) {
+    const cleaned = (newUrl || '').trim();
+    localStorage.setItem(GAS_URL_STORAGE_KEY, cleaned);
+    masterData.gasWebhookUrl = cleaned;
+    saveToLocalStorage();
 }
 
 function updateSyncStatusDot(stateStr) {
@@ -123,7 +147,7 @@ function updateSyncStatusDot(stateStr) {
     } else if (stateStr === 'syncing') {
         dot.className = 'w-2.5 h-2.5 rounded-full bg-amber-400 animate-ping';
     } else {
-        dot.className = 'w-2.5 h-2.5 rounded-full bg-slate-500';
+        dot.className = 'w-2.5 h-2.5 rounded-full bg-rose-500';
     }
 }
 
@@ -140,18 +164,22 @@ function saveToLocalStorage() {
 }
 
 function loadFromLocalStorage() {
+    checkUrlQueryForGasConfig();
     try {
         const raw = localStorage.getItem(STORAGE_KEY);
-        if (!raw) return;
-        const parsed = JSON.parse(raw);
-        if (parsed.masterData) {
-            const savedUrl = parsed.masterData.gasWebhookUrl || DEFAULT_GAS_API_URL;
-            masterData = Object.assign(masterData, parsed.masterData);
-            masterData.gasWebhookUrl = savedUrl;
+        if (raw) {
+            const parsed = JSON.parse(raw);
+            if (parsed.masterData) {
+                masterData = Object.assign(masterData, parsed.masterData);
+            }
+            if (parsed.inventoryRecords && parsed.inventoryRecords.length > 0) inventoryRecords = parsed.inventoryRecords;
+            if (parsed.addStockLogs) addStockLogs = parsed.addStockLogs;
+            if (parsed.currentWorker) appState.currentWorker = parsed.currentWorker;
         }
-        if (parsed.inventoryRecords && parsed.inventoryRecords.length > 0) inventoryRecords = parsed.inventoryRecords;
-        if (parsed.addStockLogs) addStockLogs = parsed.addStockLogs;
-        if (parsed.currentWorker) appState.currentWorker = parsed.currentWorker;
+        const savedGasUrl = localStorage.getItem(GAS_URL_STORAGE_KEY);
+        if (savedGasUrl) {
+            masterData.gasWebhookUrl = savedGasUrl;
+        }
         if (!inventoryRecords.some(r => r.id === appState.selectedRecordId)) {
             appState.selectedRecordId = inventoryRecords[0].id;
         }
@@ -163,7 +191,8 @@ async function fetchAllFromGasApi(showNotification = true) {
     if (!url) {
         updateSyncStatusDot('offline');
         if (showNotification) {
-            showToast('GASのURLが未設定です。「🔒管理PC」＞「📊GAS接続設定」から登録してください');
+            showToast('左上の「⚙️接続」ボタンからGASのURLを設定してください');
+            openGasConfigModal();
         }
         return;
     }
@@ -178,10 +207,9 @@ async function fetchAllFromGasApi(showNotification = true) {
         });
         const json = await res.json();
         if (json && json.status === 'ok' && json.data) {
-            const currentUrl = getActiveGasUrl();
             if (json.data.masterData) {
                 masterData = Object.assign(masterData, json.data.masterData);
-                masterData.gasWebhookUrl = currentUrl;
+                masterData.gasWebhookUrl = url;
             }
             if (json.data.inventoryRecords && json.data.inventoryRecords.length > 0) {
                 inventoryRecords = json.data.inventoryRecords;
@@ -381,60 +409,17 @@ const SFX = {
 
 function toggleSound() {
     appState.soundOn = !appState.soundOn;
-    document.getElementById('btn-sound').textContent = appState.soundOn ? '🔊音:ON' : '🔇音:OFF';
+    document.getElementById('btn-sound').textContent = appState.soundOn ? '🔊音' : '🔇音';
     if (appState.soundOn) SFX.key();
 }
 
 // ==========================================================
-// 2. 明るい声の音声読み上げエンジン（SpeechSynthesis + 初回タップ自動アンロック）
+// 2. 明るい声の音声読み上げ ＆ 読み上げ途中の声掛け（割り込み）対応
 // ==========================================================
 let isSpeaking = false;
+let currentSpokenText = '';
 let speechWatchdogTimer = null;
-let cachedBrightJaVoice = null;
-let ttsUnlocked = false;
-
-/**
- * 日本語の明るく聞き取りやすい音声（Kyoko / O-ren / Google 日本語 / Haruka等）を自動選択
- */
-function selectBrightJapaneseVoice() {
-    if (!('speechSynthesis' in window)) return null;
-    const voices = window.speechSynthesis.getVoices();
-    if (!voices || voices.length === 0) return null;
-
-    const jaVoices = voices.filter(v => v.lang && (v.lang.includes('ja') || v.lang.includes('JP')));
-    if (jaVoices.length === 0) return null;
-
-    // 明るくハキハキした声の優先順リスト
-    const preferredKeywords = ['Kyoko', 'O-ren', 'Google 日本語', 'Haruka', 'Nanami', 'Siri', 'Female'];
-    for (const kw of preferredKeywords) {
-        const hit = jaVoices.find(v => v.name && v.name.includes(kw));
-        if (hit) return hit;
-    }
-    return jaVoices[0];
-}
-
-if ('speechSynthesis' in window) {
-    window.speechSynthesis.onvoiceschanged = () => {
-        cachedBrightJaVoice = selectBrightJapaneseVoice();
-    };
-}
-
-/**
- * iOS Safari / Android Chromeの「初回ユーザー操作なしでの音声ブロック」を最初の画面タップで自動解除
- */
-function unlockTtsOnFirstTap() {
-    if (ttsUnlocked || !('speechSynthesis' in window)) return;
-    ttsUnlocked = true;
-    try {
-        cachedBrightJaVoice = selectBrightJapaneseVoice();
-        const silentUtter = new SpeechSynthesisUtterance('');
-        silentUtter.volume = 0;
-        silentUtter.lang = 'ja-JP';
-        window.speechSynthesis.speak(silentUtter);
-    } catch (e) {}
-}
-window.addEventListener('touchstart', unlockTtsOnFirstTap, { once: true, passive: true });
-window.addEventListener('click', unlockTtsOnFirstTap, { once: true, passive: true });
+let speakDelayTimer = null;
 
 function toggleTts() {
     appState.ttsOn = !appState.ttsOn;
@@ -448,88 +433,95 @@ function toggleTts() {
         window.speechSynthesis.cancel();
         isSpeaking = false;
     } else {
-        speakText('音声ガイドをオンにしました！', true);
+        speakText('音声案内をオンにしました！', true);
     }
 }
 
 function startRecognitionSafely() {
-    if (!appState.isListening || isSpeaking || !recognition) return;
+    if (!appState.isListening || !recognition) return;
     try {
         recognition.start();
     } catch (e) {}
 }
 
+/**
+ * 明るくハキハキした声で読み上げ（読み上げ中もマイク認識を止めずに並行稼働）
+ * ※サンプル(teraoka (1).html)と同様に utter.voice の強制上書きを行わないことでスマホ無音バグを完全防止
+ */
 function speakText(text, force = false) {
     const subEl = document.getElementById('tts-subtitle');
     if (subEl) subEl.textContent = text;
 
     if ((!appState.ttsOn && !force) || !('speechSynthesis' in window)) {
         isSpeaking = false;
-        startRecognitionSafely();
         return;
     }
 
     try {
         clearTimeout(speechWatchdogTimer);
+        clearTimeout(speakDelayTimer);
         window.speechSynthesis.cancel();
         if (window.speechSynthesis.paused) {
             window.speechSynthesis.resume();
         }
+
         isSpeaking = true;
-        if (recognition) {
-            try { recognition.abort(); } catch (e) {}
-        }
+        currentSpokenText = text;
 
-        const utter = new SpeechSynthesisUtterance(text);
-        utter.lang = 'ja-JP';
-        if (!cachedBrightJaVoice) cachedBrightJaVoice = selectBrightJapaneseVoice();
-        if (cachedBrightJaVoice) utter.voice = cachedBrightJaVoice;
+        // cancel()直後にspeak()すると消えるブラウザ対策として40ms後に発声開始
+        speakDelayTimer = setTimeout(() => {
+            try {
+                const utter = new SpeechSynthesisUtterance(text);
+                utter.lang = 'ja-JP';
+                // 明るく聞き取りやすいトーン（ピッチ 1.25 / 速度 1.15）
+                utter.rate = 1.15;
+                utter.pitch = 1.25;
+                utter.volume = 1.0;
 
-        // ★明るくハキハキとしたトーン（ピッチ高め 1.22・テンポ 1.16）
-        utter.rate = 1.16;
-        utter.pitch = 1.22;
-        utter.volume = 1.0;
+                const finishSpeak = () => {
+                    clearTimeout(speechWatchdogTimer);
+                    isSpeaking = false;
+                    if (appState.isListening) {
+                        startRecognitionSafely();
+                    }
+                };
 
-        const finishSpeak = () => {
-            clearTimeout(speechWatchdogTimer);
-            if (!isSpeaking) return;
-            isSpeaking = false;
-            if (appState.isListening) {
-                const trEl = document.getElementById('voice-transcript');
-                if (trEl) trEl.textContent = '👂 聞き取り中...（数字 または「次へ」をどうぞ）';
-                setTimeout(startRecognitionSafely, 250);
+                utter.onend = finishSpeak;
+                utter.onerror = finishSpeak;
+
+                const estDuration = Math.max(2000, text.length * 165);
+                speechWatchdogTimer = setTimeout(finishSpeak, estDuration);
+
+                window.speechSynthesis.speak(utter);
+                // 読み上げ中もマイクが止まっていれば起動しておく（途中割り込み対応）
+                if (appState.isListening) {
+                    setTimeout(startRecognitionSafely, 120);
+                }
+            } catch (err) {
+                isSpeaking = false;
             }
-        };
-
-        utter.onend = finishSpeak;
-        utter.onerror = finishSpeak;
-
-        const estDuration = Math.max(1800, text.length * 160);
-        speechWatchdogTimer = setTimeout(finishSpeak, estDuration);
-
-        window.speechSynthesis.speak(utter);
+        }, 40);
     } catch (e) {
         isSpeaking = false;
-        startRecognitionSafely();
     }
 }
 
 function speakCurrentRecord(force = false, prefix = '') {
     const rec = getCurrentRecord();
     if (!rec) return;
-    const msg = `${prefix}${rec.area}、${rec.shelf}、${rec.level}。${rec.name}、単位は${rec.unit}。前回 ${rec.prevQty}${rec.unit}。数量をどうぞ！`;
+    // 読み上げ途中でも割り込みやすいよう、簡潔でテンポの良い案内文にする
+    const msg = `${prefix}${rec.area}、${rec.shelf}。${rec.name}、単位は${rec.unit}。前回 ${rec.prevQty}。数量をどうぞ！`;
     speakText(msg, force);
 }
 
 // ==========================================================
-// 3. 連続音声認識エンジン（サンプルと同一のiPhone/Android安定方式）
+// 3. 連続音声認識エンジン（読み上げ途中の声掛け割り込み＆エコー誤爆防止）
 // ==========================================================
 let recognition = null;
 let lastProcessedTranscript = '';
 let lastProcessedTime = 0;
 
 function toggleVoiceRecognition() {
-    unlockTtsOnFirstTap();
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
         showToast('このブラウザは音声認識APIに非対応です');
@@ -541,6 +533,7 @@ function toggleVoiceRecognition() {
         appState.isListening = false;
         isSpeaking = false;
         clearTimeout(speechWatchdogTimer);
+        if (window.speechSynthesis) window.speechSynthesis.cancel();
         if (recognition) {
             try { recognition.abort(); } catch (e) {}
         }
@@ -555,14 +548,11 @@ function toggleVoiceRecognition() {
     recognition.maxAlternatives = 3;
 
     recognition.onstart = () => {
-        if (!isSpeaking) {
-            const trEl = document.getElementById('voice-transcript');
-            if (trEl) trEl.textContent = '👂 聞き取り中...（数字 / 次へ / 前回同数）';
-        }
+        const trEl = document.getElementById('voice-transcript');
+        if (trEl) trEl.textContent = '👂 聞き取り中（読み上げ途中でも「数字」「次へ」に反応します）';
     };
 
     recognition.onresult = (event) => {
-        if (isSpeaking) return;
         let interimText = '';
         let finalText = '';
 
@@ -575,6 +565,15 @@ function toggleVoiceRecognition() {
             }
         }
 
+        // 読み上げ途中にユーザーが話し始めた場合、自分の読み上げ音声（エコー）でなければ即座に読み上げを止めて聞き取る
+        if (isSpeaking && interimText) {
+            const cleanInterim = interimText.trim();
+            if (!isLikelySelfEcho(cleanInterim)) {
+                if (window.speechSynthesis) window.speechSynthesis.cancel();
+                isSpeaking = false;
+            }
+        }
+
         const trEl = document.getElementById('voice-transcript');
         if (interimText && trEl) {
             trEl.textContent = `認識中: 「${interimText}」...`;
@@ -582,10 +581,15 @@ function toggleVoiceRecognition() {
 
         if (finalText) {
             const cleaned = finalText.trim();
+            if (isSpeaking && isLikelySelfEcho(cleaned)) {
+                return;
+            }
             const now = Date.now();
-            if (cleaned && !(cleaned === lastProcessedTranscript && now - lastProcessedTime < 1200)) {
+            if (cleaned && !(cleaned === lastProcessedTranscript && now - lastProcessedTime < 1000)) {
                 lastProcessedTranscript = cleaned;
                 lastProcessedTime = now;
+                if (window.speechSynthesis) window.speechSynthesis.cancel();
+                isSpeaking = false;
                 processVoiceCommand(cleaned);
             }
         }
@@ -598,26 +602,42 @@ function toggleVoiceRecognition() {
             showToast('⚠️ マイクの使用が許可されていません。ブラウザ設定でマイクを許可してください');
             return;
         }
-        if (appState.isListening && !isSpeaking) {
-            setTimeout(startRecognitionSafely, 300);
+        if (appState.isListening) {
+            setTimeout(startRecognitionSafely, 250);
         }
     };
 
     recognition.onend = () => {
-        if (appState.isListening && !isSpeaking) {
-            setTimeout(startRecognitionSafely, 150);
-        } else if (!appState.isListening) {
+        if (appState.isListening) {
+            setTimeout(startRecognitionSafely, 120);
+        } else {
             updateVoiceUI(false);
         }
     };
 
     appState.isListening = true;
     updateVoiceUI(true);
-    showToast('🎤 ハンズフリー音声入力を開始しました');
+    showToast('🎤 ハンズフリー開始（読み上げ途中の声掛けにも反応します）');
     startRecognitionSafely();
     setTimeout(() => {
-        if (appState.isListening) speakCurrentRecord(true, '音声入力を開始します！');
-    }, 350);
+        if (appState.isListening) speakCurrentRecord(true, 'ハンズフリー開始！');
+    }, 300);
+}
+
+/**
+ * スピーカーから流れているアプリ自身の読み上げ音声をマイクが拾ったかどうかを判定するフィルター
+ */
+function isLikelySelfEcho(heardText) {
+    if (!heardText) return true;
+    // 明確な操作コマンドや短い数字発話ならユーザーの割り込み声掛けとして通す
+    if (/^(次|つぎ|次へ|確定|かくてい|オッケー|OK|はい|戻る|もどる|クリア|ゼロ|ストップ|止めて|\d+)$/i.test(heardText)) {
+        return false;
+    }
+    const rec = getCurrentRecord();
+    if (rec && (heardText.includes(rec.name) || heardText.includes('数量をどうぞ') || heardText.includes('単位は'))) {
+        return true;
+    }
+    return false;
 }
 
 function updateVoiceUI(active) {
@@ -645,6 +665,13 @@ function processVoiceCommand(rawText) {
     const rec = getCurrentRecord();
     const unit = rec ? rec.unit : '個';
 
+    if (/ストップ|止めて|とめて|静かに/.test(rawText)) {
+        if (window.speechSynthesis) window.speechSynthesis.cancel();
+        isSpeaking = false;
+        SFX.voiceOk();
+        return;
+    }
+
     if (/もう一回|もう一度|もういっかい|もういちど|読み上げ|よみあげ|なに|何/.test(rawText)) {
         speakCurrentRecord(true);
         return;
@@ -658,7 +685,7 @@ function processVoiceCommand(rawText) {
     if (/クリア|リセット|取り消し|とりけし|ゼロ|ぜろ/.test(rawText)) {
         clearQtyInput();
         SFX.voiceOk();
-        speakText('ゼロにクリアしました！数量をどうぞ');
+        speakText('ゼロにクリア！数量をどうぞ');
         return;
     }
 
@@ -666,9 +693,9 @@ function processVoiceCommand(rawText) {
         copyPrevQty();
         SFX.voiceOk();
         if (/次|つぎ|確定|かくてい|はい/.test(rawText)) {
-            setTimeout(confirmAndNextRecord, 250);
+            setTimeout(confirmAndNextRecord, 200);
         } else {
-            speakText(`前回と同じ、${rec.prevQty}${unit}！よろしければ、次へ、と言ってください`);
+            speakText(`前回と同じ、${rec.prevQty}${unit}！次へ、で確定します`);
         }
         return;
     }
@@ -680,9 +707,9 @@ function processVoiceCommand(rawText) {
         applyBufferToCurrentRecord();
 
         if (/次|つぎ|確定|かくてい|オッケー|OK|はい/i.test(rawText)) {
-            setTimeout(confirmAndNextRecord, 250);
+            setTimeout(confirmAndNextRecord, 200);
         } else {
-            speakText(`${parsedNum}${unit}！よろしければ、次へ、と言ってください`);
+            speakText(`${parsedNum}${unit}！次へ、で確定します`);
         }
         return;
     }
@@ -742,7 +769,7 @@ function extractJapaneseNumber(str) {
 }
 
 // ==========================================================
-// 4. サンプル(teraoka (1).html)完全移植：全方向カメラスキャナー制御
+// 4. 全方向カメラスキャナー（Quagga2高コントラスト + ネイティブBarcodeDetector併用）
 // ==========================================================
 let mediaStream = null;
 let offscreenVideo = null;
@@ -753,8 +780,21 @@ let previewLoopId = null;
 let decodeTimerId = null;
 let isDecodingFrame = false;
 let scanFrameParity = 0;
+let scanAttemptCount = 0;
 let lastCandidateCode = '';
 let candidateHitCount = 0;
+let nativeBarcodeDetector = null;
+
+// Android Chrome等で対応していればOS純正の超高速BarcodeDetectorも併用
+if ('BarcodeDetector' in window) {
+    try {
+        nativeBarcodeDetector = new BarcodeDetector({
+            formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128']
+        });
+    } catch (e) {
+        nativeBarcodeDetector = null;
+    }
+}
 
 function calcCoverCrop(vw, vh, destW, destH, zoom) {
     const srcRatio = vw / vh;
@@ -778,7 +818,6 @@ function calcCoverCrop(vw, vh, destW, destH, zoom) {
 }
 
 async function toggleCameraScanner() {
-    unlockTtsOnFirstTap();
     if (isCameraRunning) {
         await stopCameraScanner();
     } else {
@@ -810,6 +849,7 @@ async function startCameraScanner() {
         await offscreenVideo.play();
 
         isCameraRunning = true;
+        scanAttemptCount = 0;
         document.getElementById('camera-wrapper').classList.remove('hidden');
         const btn = document.getElementById('btn-cam-toggle');
         btn.classList.remove('bg-emerald-600');
@@ -846,26 +886,49 @@ async function startCameraScanner() {
         const decodeCanvas = document.getElementById('decode-canvas');
         const decodeCtx = decodeCanvas.getContext('2d', { willReadFrequently: true });
 
-        decodeTimerId = setInterval(() => {
+        decodeTimerId = setInterval(async () => {
             if (!isCameraRunning || isScanPaused || isDecodingFrame || !offscreenVideo) return;
             if (offscreenVideo.readyState < offscreenVideo.HAVE_ENOUGH_DATA || offscreenVideo.videoWidth === 0) return;
 
             isDecodingFrame = true;
+            scanAttemptCount++;
+            const debugEl = document.getElementById('scan-debug-info');
+            if (debugEl) {
+                debugEl.textContent = `解析中: ${scanAttemptCount}回 ${lastCandidateCode ? `(候補:${lastCandidateCode})` : ''}`;
+            }
+
+            // 1. OSネイティブBarcodeDetectorが使える場合は先行チェック
+            if (nativeBarcodeDetector) {
+                try {
+                    const barcodes = await nativeBarcodeDetector.detect(previewCanvas);
+                    if (barcodes && barcodes.length > 0 && barcodes[0].rawValue) {
+                        const nativeCode = barcodes[0].rawValue.trim();
+                        if (nativeCode.length >= 8) {
+                            isDecodingFrame = false;
+                            pauseCameraScan();
+                            handleBarcodeScan(nativeCode);
+                            return;
+                        }
+                    }
+                } catch (e) {}
+            }
+
+            // 2. サンプル(teraoka (1).html)完全準拠のQuagga2全方向・高コントラスト解析
             const vw = offscreenVideo.videoWidth;
             const vh = offscreenVideo.videoHeight;
             const rect = previewCanvas.getBoundingClientRect();
-            const destW = Math.max(280, rect.width);
-            const destH = Math.max(160, rect.height);
+            const destW = Math.max(280, rect.width || 320);
+            const destH = Math.max(160, rect.height || 176);
 
             const { cropX, cropY, cropW, cropH } = calcCoverCrop(vw, vh, destW, destH, digitalZoom);
-            const bandX = Math.floor(cropX + cropW * 0.14);
-            const bandY = Math.floor(cropY + cropH * 0.12);
-            const bandW = Math.floor(cropW * 0.72);
-            const bandH = Math.floor(cropH * 0.76);
+            const bandX = Math.floor(cropX + cropW * 0.12);
+            const bandY = Math.floor(cropY + cropH * 0.10);
+            const bandW = Math.floor(cropW * 0.76);
+            const bandH = Math.floor(cropH * 0.80);
 
             const rotate90 = (scanFrameParity % 2 === 1);
             scanFrameParity++;
-            const targetSize = 520;
+            const targetSize = 560;
 
             if (!rotate90) {
                 decodeCanvas.width = targetSize;
@@ -882,9 +945,14 @@ async function startCameraScanner() {
                 decodeCtx.restore();
             }
 
-            // ★サンプルと同一のコントラスト強調処理（これで全方向の読取精度が劇的に向上）
             enhanceBarcodeContrast(decodeCtx, decodeCanvas.width, decodeCanvas.height);
-            const dataUrl = decodeCanvas.toDataURL('image/jpeg', 0.85);
+            const dataUrl = decodeCanvas.toDataURL('image/jpeg', 0.88);
+
+            if (typeof Quagga === 'undefined') {
+                if (debugEl) debugEl.textContent = '⚠️Quagga読込エラー';
+                isDecodingFrame = false;
+                return;
+            }
 
             Quagga.decodeSingle({
                 src: dataUrl,
@@ -898,14 +966,15 @@ async function startCameraScanner() {
                 isDecodingFrame = false;
                 if (!isCameraRunning || isScanPaused) return;
                 if (result && result.codeResult && result.codeResult.code) {
-                    const code = result.codeResult.code;
+                    const code = result.codeResult.code.trim();
                     if (code === lastCandidateCode) {
                         candidateHitCount++;
                     } else {
                         lastCandidateCode = code;
                         candidateHitCount = 1;
                     }
-                    if (candidateHitCount >= 2) {
+                    // EAN-13/8のチェックデジットが正しいか、または2回連続一致で即確定
+                    if (candidateHitCount >= 2 || isValidJanCheckDigit(code)) {
                         lastCandidateCode = '';
                         candidateHitCount = 0;
                         pauseCameraScan();
@@ -918,6 +987,23 @@ async function startCameraScanner() {
         showToast('カメラ起動エラー: ' + err.message);
         await stopCameraScanner();
     }
+}
+
+/**
+ * JANコード(13桁/8桁)のチェックデジット検証（正しいJANなら1フレーム目でも即反応させる）
+ */
+function isValidJanCheckDigit(code) {
+    if (!/^\d{13}$|^\d{8}$/.test(code)) return false;
+    const digits = code.split('').map(Number);
+    const checkDigit = digits.pop();
+    let sum = 0;
+    const len = digits.length;
+    for (let i = 0; i < len; i++) {
+        const weight = ((len - 1 - i) % 2 === 0) ? 3 : 1;
+        sum += digits[i] * weight;
+    }
+    const calc = (10 - (sum % 10)) % 10;
+    return calc === checkDigit;
 }
 
 function enhanceBarcodeContrast(ctx, w, h) {
