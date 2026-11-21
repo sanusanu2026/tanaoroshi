@@ -1,12 +1,13 @@
 /**
- * app-core.js (v4)
+ * app-core.js (v5)
  * ・公開コード内にGASのURLを一切持たず、UIの設定モーダル(localStorage)またはURLパラメータ(?gas=...)から安全に読み込む設計
- * ・明るい声の音声読み上げ(voice強制指定を廃止しスマホ無音バグを解消、pitch=1.25 / rate=1.15)
- * ・読み上げ途中の声掛け(割り込みコマンド)対応：読み上げ中もマイクを止めず、ユーザー発話検知で即座に読み上げを中断して反応
- * ・全方向バーコードスキャン(コントラスト強調Quagga2 + ネイティブBarcodeDetectorハイブリッド + 稼働モニター表示)
+ * ・明るい声の即時発声(setTimeout待機を撤去しiPhone Safariの無音ブロックを完全回避、pitch=1.25 / rate=1.15)
+ * ・読み上げ途中の声掛け(割り込みコマンド)対応
+ * ・全方向バーコードスキャン(コントラスト強調Quagga2 + ネイティブBarcodeDetectorハイブリッド)
+ * ・GAS通信エラーの原因特定メッセージ表示
  */
 
-const STORAGE_KEY = 'smart_inventory_solution_b_v4';
+const STORAGE_KEY = 'smart_inventory_solution_b_v5';
 const GAS_URL_STORAGE_KEY = 'smart_inventory_gas_api_url_v4';
 
 const defaultMaster = {
@@ -110,9 +111,6 @@ const appState = {
     ttsOn: true
 };
 
-/**
- * URLパラメータ(?gas=...)で共有リンクが開かれた場合、端末のlocalStorageへ保存してアドレスバーからURLを隠す
- */
 function checkUrlQueryForGasConfig() {
     try {
         const params = new URLSearchParams(window.location.search);
@@ -120,7 +118,6 @@ function checkUrlQueryForGasConfig() {
         if (gasParam && gasParam.startsWith('https://script.google.com/')) {
             localStorage.setItem(GAS_URL_STORAGE_KEY, gasParam.trim());
             masterData.gasWebhookUrl = gasParam.trim();
-            // アドレスバーから ?gas=... を消去して画面をすっきり＆安全に保つ
             const cleanUrl = window.location.origin + window.location.pathname;
             window.history.replaceState({}, document.title, cleanUrl);
         }
@@ -186,6 +183,9 @@ function loadFromLocalStorage() {
     } catch (e) {}
 }
 
+/**
+ * GAS JSON API (doGet) からスプレッドシート最新データを取得（エラー原因の詳細診断付き）
+ */
 async function fetchAllFromGasApi(showNotification = true) {
     const url = getActiveGasUrl();
     if (!url) {
@@ -193,6 +193,14 @@ async function fetchAllFromGasApi(showNotification = true) {
         if (showNotification) {
             showToast('左上の「⚙️接続」ボタンからGASのURLを設定してください');
             openGasConfigModal();
+        }
+        return;
+    }
+
+    if (!url.startsWith('https://script.google.com/macros/s/') || !url.endsWith('/exec')) {
+        updateSyncStatusDot('offline');
+        if (showNotification) {
+            showToast('⚠️ URL形式エラー: 末尾が「/exec」のウェブアプリURLを設定してください');
         }
         return;
     }
@@ -205,7 +213,13 @@ async function fetchAllFromGasApi(showNotification = true) {
             method: 'GET',
             redirect: 'follow'
         });
-        const json = await res.json();
+
+        const rawText = await res.text();
+        if (rawText.trim().startsWith('<')) {
+            throw new Error('GASの公開権限が「全員」になっていないか、古いHTML版コードのままです（デプロイ設定を確認してください）');
+        }
+
+        const json = JSON.parse(rawText);
         if (json && json.status === 'ok' && json.data) {
             if (json.data.masterData) {
                 masterData = Object.assign(masterData, json.data.masterData);
@@ -227,11 +241,16 @@ async function fetchAllFromGasApi(showNotification = true) {
             updateSyncStatusDot('ok');
             if (showNotification) showToast('✅ スプレッドシートから最新データを読み込みました');
         } else {
-            throw new Error(json.message || 'Invalid response');
+            throw new Error(json.message || 'GASから無効なレスポンスが返りました');
         }
     } catch (err) {
         updateSyncStatusDot('offline');
-        if (showNotification) showToast('⚠️ GAS通信エラー（オフライン保存中）: ' + err.message);
+        if (showNotification) {
+            const msg = err.message.includes('Failed to fetch')
+                ? '⚠️ 通信ブロック: GASのデプロイ設定で「アクセスできるユーザー：全員」になっているか確認してください'
+                : '⚠️ GAS通信エラー: ' + err.message;
+            showToast(msg);
+        }
     }
 }
 
@@ -414,12 +433,10 @@ function toggleSound() {
 }
 
 // ==========================================================
-// 2. 明るい声の音声読み上げ ＆ 読み上げ途中の声掛け（割り込み）対応
+// 2. 明るい声の即時読み上げ ＆ 読み上げ途中の声掛け（割り込み）対応
 // ==========================================================
 let isSpeaking = false;
-let currentSpokenText = '';
 let speechWatchdogTimer = null;
-let speakDelayTimer = null;
 
 function toggleTts() {
     appState.ttsOn = !appState.ttsOn;
@@ -445,8 +462,7 @@ function startRecognitionSafely() {
 }
 
 /**
- * 明るくハキハキした声で読み上げ（読み上げ中もマイク認識を止めずに並行稼働）
- * ※サンプル(teraoka (1).html)と同様に utter.voice の強制上書きを行わないことでスマホ無音バグを完全防止
+ * 明るくハキハキした声で即時発声（setTimeoutを入れず同期実行することでiOS Safariの無音ブロックを完全回避）
  */
 function speakText(text, force = false) {
     const subEl = document.getElementById('tts-subtitle');
@@ -459,48 +475,41 @@ function speakText(text, force = false) {
 
     try {
         clearTimeout(speechWatchdogTimer);
-        clearTimeout(speakDelayTimer);
         window.speechSynthesis.cancel();
         if (window.speechSynthesis.paused) {
             window.speechSynthesis.resume();
         }
 
         isSpeaking = true;
-        currentSpokenText = text;
 
-        // cancel()直後にspeak()すると消えるブラウザ対策として40ms後に発声開始
-        speakDelayTimer = setTimeout(() => {
-            try {
-                const utter = new SpeechSynthesisUtterance(text);
-                utter.lang = 'ja-JP';
-                // 明るく聞き取りやすいトーン（ピッチ 1.25 / 速度 1.15）
-                utter.rate = 1.15;
-                utter.pitch = 1.25;
-                utter.volume = 1.0;
+        const utter = new SpeechSynthesisUtterance(text);
+        utter.lang = 'ja-JP';
+        // 明るくハキハキしたトーン（ピッチ 1.25 / 速度 1.15）
+        utter.rate = 1.15;
+        utter.pitch = 1.25;
+        utter.volume = 1.0;
 
-                const finishSpeak = () => {
-                    clearTimeout(speechWatchdogTimer);
-                    isSpeaking = false;
-                    if (appState.isListening) {
-                        startRecognitionSafely();
-                    }
-                };
-
-                utter.onend = finishSpeak;
-                utter.onerror = finishSpeak;
-
-                const estDuration = Math.max(2000, text.length * 165);
-                speechWatchdogTimer = setTimeout(finishSpeak, estDuration);
-
-                window.speechSynthesis.speak(utter);
-                // 読み上げ中もマイクが止まっていれば起動しておく（途中割り込み対応）
-                if (appState.isListening) {
-                    setTimeout(startRecognitionSafely, 120);
-                }
-            } catch (err) {
-                isSpeaking = false;
+        const finishSpeak = () => {
+            clearTimeout(speechWatchdogTimer);
+            isSpeaking = false;
+            if (appState.isListening) {
+                startRecognitionSafely();
             }
-        }, 40);
+        };
+
+        utter.onend = finishSpeak;
+        utter.onerror = finishSpeak;
+
+        const estDuration = Math.max(2000, text.length * 165);
+        speechWatchdogTimer = setTimeout(finishSpeak, estDuration);
+
+        // ★待機なしで即座に発声（iOS Safariで確実に声が出る必須条件）
+        window.speechSynthesis.speak(utter);
+
+        // 読み上げ中もマイク認識を維持（途中割り込み対応）
+        if (appState.isListening) {
+            setTimeout(startRecognitionSafely, 120);
+        }
     } catch (e) {
         isSpeaking = false;
     }
@@ -509,7 +518,6 @@ function speakText(text, force = false) {
 function speakCurrentRecord(force = false, prefix = '') {
     const rec = getCurrentRecord();
     if (!rec) return;
-    // 読み上げ途中でも割り込みやすいよう、簡潔でテンポの良い案内文にする
     const msg = `${prefix}${rec.area}、${rec.shelf}。${rec.name}、単位は${rec.unit}。前回 ${rec.prevQty}。数量をどうぞ！`;
     speakText(msg, force);
 }
@@ -565,7 +573,6 @@ function toggleVoiceRecognition() {
             }
         }
 
-        // 読み上げ途中にユーザーが話し始めた場合、自分の読み上げ音声（エコー）でなければ即座に読み上げを止めて聞き取る
         if (isSpeaking && interimText) {
             const cleanInterim = interimText.trim();
             if (!isLikelySelfEcho(cleanInterim)) {
@@ -619,17 +626,12 @@ function toggleVoiceRecognition() {
     updateVoiceUI(true);
     showToast('🎤 ハンズフリー開始（読み上げ途中の声掛けにも反応します）');
     startRecognitionSafely();
-    setTimeout(() => {
-        if (appState.isListening) speakCurrentRecord(true, 'ハンズフリー開始！');
-    }, 300);
+    // ユーザー操作イベント内で即座に発声開始
+    speakCurrentRecord(true, 'ハンズフリー開始！');
 }
 
-/**
- * スピーカーから流れているアプリ自身の読み上げ音声をマイクが拾ったかどうかを判定するフィルター
- */
 function isLikelySelfEcho(heardText) {
     if (!heardText) return true;
-    // 明確な操作コマンドや短い数字発話ならユーザーの割り込み声掛けとして通す
     if (/^(次|つぎ|次へ|確定|かくてい|オッケー|OK|はい|戻る|もどる|クリア|ゼロ|ストップ|止めて|\d+)$/i.test(heardText)) {
         return false;
     }
@@ -785,7 +787,6 @@ let lastCandidateCode = '';
 let candidateHitCount = 0;
 let nativeBarcodeDetector = null;
 
-// Android Chrome等で対応していればOS純正の超高速BarcodeDetectorも併用
 if ('BarcodeDetector' in window) {
     try {
         nativeBarcodeDetector = new BarcodeDetector({
@@ -897,7 +898,6 @@ async function startCameraScanner() {
                 debugEl.textContent = `解析中: ${scanAttemptCount}回 ${lastCandidateCode ? `(候補:${lastCandidateCode})` : ''}`;
             }
 
-            // 1. OSネイティブBarcodeDetectorが使える場合は先行チェック
             if (nativeBarcodeDetector) {
                 try {
                     const barcodes = await nativeBarcodeDetector.detect(previewCanvas);
@@ -913,7 +913,6 @@ async function startCameraScanner() {
                 } catch (e) {}
             }
 
-            // 2. サンプル(teraoka (1).html)完全準拠のQuagga2全方向・高コントラスト解析
             const vw = offscreenVideo.videoWidth;
             const vh = offscreenVideo.videoHeight;
             const rect = previewCanvas.getBoundingClientRect();
@@ -973,7 +972,6 @@ async function startCameraScanner() {
                         lastCandidateCode = code;
                         candidateHitCount = 1;
                     }
-                    // EAN-13/8のチェックデジットが正しいか、または2回連続一致で即確定
                     if (candidateHitCount >= 2 || isValidJanCheckDigit(code)) {
                         lastCandidateCode = '';
                         candidateHitCount = 0;
@@ -989,9 +987,6 @@ async function startCameraScanner() {
     }
 }
 
-/**
- * JANコード(13桁/8桁)のチェックデジット検証（正しいJANなら1フレーム目でも即反応させる）
- */
 function isValidJanCheckDigit(code) {
     if (!/^\d{13}$|^\d{8}$/.test(code)) return false;
     const digits = code.split('').map(Number);
