@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>スマート棚卸システム v6（スマホ入力 ＆ PC管理ダッシュボード）</title>
+    <title>スマート棚卸システム v7（スマホ入力 ＆ PC管理ダッシュボード）</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- 1次元バーコード（JAN/EAN）高速認識エンジン Quagga2 -->
     <script src="https://cdn.jsdelivr.net/npm/@ericblade/quagga2@1.8.4/dist/quagga.min.js"></script>
@@ -49,10 +49,10 @@
 </head>
 <body class="min-h-screen flex flex-col">
 
-    <!-- 最上部コンパクト共通ヘッダー（v6バッジ付き） -->
+    <!-- 最上部コンパクト共通ヘッダー（v7バッジ付き） -->
     <header class="bg-slate-900 text-white px-2 py-1.5 flex items-center justify-between gap-1 sticky top-0 z-30 shadow">
         <div class="flex items-center gap-1">
-            <span class="bg-indigo-600 text-white font-mono font-bold text-[10px] px-1.5 py-0.5 rounded">v6</span>
+            <span class="bg-emerald-500 text-slate-950 font-mono font-extrabold text-[10px] px-1.5 py-0.5 rounded">v7</span>
             <!-- GAS URL接続設定ボタン -->
             <button onclick="openGasConfigModal()" class="bg-slate-800 hover:bg-slate-700 border border-slate-600 text-[11px] px-1.5 py-1 rounded flex items-center gap-1 font-bold" title="GASスプレッドシート接続URL設定">
                 <span id="sync-status-dot" class="w-2.5 h-2.5 rounded-full bg-rose-500"></span>
@@ -87,7 +87,7 @@
     <!-- ========================================================== -->
     <main id="mobile-view" class="flex-1 max-w-md w-full mx-auto p-2 flex flex-col gap-1.5">
 
-        <!-- ① 最上部：ロケーション切替 ＆ 全方向カメラスキャン・音声バー -->
+        <!-- ① 最上部：ロケーション切替 ＆ ノンストップ連続カメラスキャン・音声バー -->
         <div class="bg-white rounded-xl p-2 shadow-sm border border-slate-200 flex flex-col gap-1.5">
             <div class="grid grid-cols-3 gap-1 text-[11px]">
                 <select id="m-sel-area" onchange="onMobileLocationFilter()" class="bg-slate-100 border border-slate-300 rounded px-1.5 py-1 font-bold text-slate-800 truncate"></select>
@@ -129,34 +129,28 @@
             <!-- 解析用非表示Canvas -->
             <canvas id="decode-canvas" class="hidden"></canvas>
 
-            <!-- 全方向カメラプレビュー枠（JAN専用・3重誤読防止フィルター） -->
+            <!-- ノンストップ連続カメラプレビュー枠（一時停止なし・読取成功フラッシュ付き） -->
             <div id="camera-wrapper" class="hidden relative w-full h-44 bg-black rounded-xl overflow-hidden flex items-center justify-center border-2 border-slate-700">
                 <canvas id="preview-canvas" class="w-full h-full block"></canvas>
 
-                <!-- 左上：スキャンエンジン稼働モニター -->
+                <!-- 左上：スキャンエンジン稼働モニター（v7表示付き） -->
                 <div class="absolute top-1.5 left-1.5 bg-black/80 text-emerald-300 text-[10px] font-mono px-2 py-0.5 rounded z-10 pointer-events-none">
-                    <span id="scan-debug-info">JAN解析待機中...</span>
+                    <span id="scan-debug-info">[v7] 連続スキャン待機中...</span>
                 </div>
 
-                <!-- スキャン稼働中ガイド枠 -->
+                <!-- 読取成功時の軽量バナー（カメラを止めずに1.6秒だけ表示） -->
+                <div id="scan-success-banner" class="hidden absolute top-8 left-1/2 -translate-x-1/2 bg-emerald-500 text-slate-950 font-extrabold text-xs px-3 py-1 rounded-full shadow-lg z-20 whitespace-nowrap pointer-events-none">
+                    ✅ 読取完了！次の商品をかざせます
+                </div>
+
+                <!-- 常時稼働ガイド枠 -->
                 <div id="scan-overlay" class="absolute inset-0 pointer-events-none">
-                    <div class="absolute inset-x-[14%] inset-y-[12%] border-2 border-emerald-400/90 rounded-xl shadow-[0_0_0_9999px_rgba(0,0,0,0.40)]"></div>
+                    <div id="scan-guide-box" class="absolute inset-x-[14%] inset-y-[12%] border-2 border-emerald-400/90 rounded-xl shadow-[0_0_0_9999px_rgba(0,0,0,0.40)] transition-colors duration-150"></div>
                     <div class="laser-line"></div>
                     <div class="absolute inset-y-[16%] left-1/2 w-[1px] bg-emerald-400/40"></div>
                     <span class="absolute bottom-1.5 left-1/2 -translate-x-1/2 bg-black/80 text-emerald-300 text-[10px] px-2.5 py-0.5 rounded-full whitespace-nowrap">
-                        🔍 JANバーコードを緑枠内にピントを合わせてください
+                        🔍 連続読取ON：緑枠にかざすだけで次々スキャン
                     </span>
-                </div>
-
-                <!-- 読取後の一時停止オーバーレイ -->
-                <div id="scan-paused-overlay" class="hidden absolute inset-0 bg-slate-950/75 flex flex-col items-center justify-center p-2 text-center z-20">
-                    <span class="bg-amber-500 text-slate-950 font-bold text-xs px-2.5 py-0.5 rounded-full mb-1">
-                        ⏸ バーコード読取完了
-                    </span>
-                    <p class="text-white text-[11px] mb-1.5">数量を入力して「確定して次へ」で次の読取を再開します</p>
-                    <button onclick="resumeCameraScan()" class="tap-btn bg-slate-700 text-white border border-slate-400 px-3 py-1 rounded-lg text-xs font-bold">
-                        🔄 別の商品を再スキャン
-                    </button>
                 </div>
 
                 <!-- デジタルズーム切替（初期1.6x） -->
@@ -301,6 +295,11 @@
                 <div id="m-inventory-list" class="max-h-56 overflow-y-auto divide-y divide-slate-100 border border-slate-200 rounded-lg"></div>
             </div>
         </div>
+
+        <!-- バージョン確認フッター -->
+        <footer class="text-center text-[10px] text-slate-400 font-mono py-1">
+            Smart Inventory System <b class="text-slate-600">v7</b> (Continuous Scan &amp; Voice Ready)
+        </footer>
     </main>
 
     <!-- ========================================================== -->
@@ -312,7 +311,7 @@
         <div class="bg-slate-900 text-white p-4 rounded-2xl shadow flex flex-wrap items-center justify-between gap-3">
             <div>
                 <div class="flex items-center gap-2">
-                    <span class="bg-amber-400 text-slate-950 font-extrabold text-xs px-2.5 py-0.5 rounded">管理者専用 PCモード v6</span>
+                    <span class="bg-emerald-400 text-slate-950 font-extrabold text-xs px-2.5 py-0.5 rounded">管理者専用 PCモード v7</span>
                     <h2 class="text-lg sm:text-xl font-bold">全体進捗・二軸集計（場所×商品）・マスタ管理</h2>
                 </div>
                 <p class="text-xs text-slate-400 mt-0.5">最大15名の作業データ集約・後から追加分の履歴追跡・GASスプレッドシートAPI連携</p>
@@ -565,8 +564,8 @@
     <!-- トースト通知 -->
     <div id="toast-box" class="fixed bottom-3 right-3 left-3 sm:left-auto bg-slate-900 text-white border-l-4 border-amber-400 px-3.5 py-2.5 rounded-xl shadow-xl text-xs font-bold hidden z-50"></div>
 
-    <!-- キャッシュ防止クエリ(?v=6)付きで分割スクリプトを読み込み -->
-    <script src="app-core.js?v=6"></script>
-    <script src="app-ui.js?v=6"></script>
+    <!-- キャッシュ防止クエリ(?v=7)付きで分割スクリプトを読み込み -->
+    <script src="app-core.js?v=7"></script>
+    <script src="app-ui.js?v=7"></script>
 </body>
 </html>
