@@ -1,13 +1,14 @@
 /**
- * app-core.js（解決策B：外部ホスト画面 × GAS JSON API 双方向通信エンジン）
- * ・GASのiframe制限を完全回避し、iOS Safari / Android Chromeでリアルタイムカメラ＆音声認識を100%稼働
- * ・CORSプリフライトを発生させない text/plain POST通信と GET JSON同期
+ * app-core.js
+ * ・サンプル(teraoka (1).html)で実証済みの全方向カメラスキャンエンジン(コントラスト強調・520px・0/90度交互解析)を100%完全移植
+ * ・明るくハキハキした音声読み上げ(pitch=1.22 / rate=1.16 + 日本語女性ボイス優先選択 + 初回タップ自動アンロック)
+ * ・iOS Safari / Android Chrome 両対応の連続音声認識＆日本語数字変換エンジン
  */
 
 // ★ステップ1でデプロイしたGASウェブアプリのURL（https://script.google.com/macros/s/XXXX/exec）をここに貼り付けてください
 const DEFAULT_GAS_API_URL = 'https://script.google.com/a/macros/ttc-gr.co.jp/s/AKfycbzgpH2_jLWeUel0gOOyebZOOmG9n9Zv7iWNAIUJFUa_dOD0AuSTn8vQPIc3YVASFm5jGg/exec';
 
-const STORAGE_KEY = 'smart_inventory_solution_b_v1';
+const STORAGE_KEY = 'smart_inventory_solution_b_v2';
 
 const defaultMaster = {
     adminPin: '1234',
@@ -157,15 +158,12 @@ function loadFromLocalStorage() {
     } catch (e) {}
 }
 
-/**
- * GAS JSON API (doGet) からスプレッドシート最新データを取得
- */
 async function fetchAllFromGasApi(showNotification = true) {
     const url = getActiveGasUrl();
     if (!url) {
         updateSyncStatusDot('offline');
         if (showNotification) {
-            showToast('GASのURLが未設定です。「📊GAS接続設定」からURLを登録してください');
+            showToast('GASのURLが未設定です。「🔒管理PC」＞「📊GAS接続設定」から登録してください');
         }
         return;
     }
@@ -209,10 +207,6 @@ async function fetchAllFromGasApi(showNotification = true) {
     }
 }
 
-/**
- * GAS JSON API (doPost) へ1件の確定データ（および後から追加ログ）を送信
- * ※Content-Typeを text/plain にすることでCORSプリフライトエラーを完全に防止
- */
 async function postToGasApi(payloadObj) {
     const url = getActiveGasUrl();
     if (!url) return;
@@ -305,7 +299,7 @@ function getProductAggregatedList() {
 }
 
 // ==========================================================
-// スキャン音・操作音エンジン（iOS / Android Web Audio API + WAV）
+// 1. スキャン音・操作音（iOS/Android対応 WAV + Web Audio API）
 // ==========================================================
 let audioCtx = null;
 let beepAudioEl = null;
@@ -313,10 +307,11 @@ let beepAudioEl = null;
 function initWavBeep() {
     if (beepAudioEl) return;
     const sampleRate = 22050;
-    const duration = 0.08;
+    const duration = 0.09;
     const numSamples = Math.floor(sampleRate * duration);
     const buffer = new ArrayBuffer(44 + numSamples);
     const view = new DataView(buffer);
+
     const writeStr = (offset, str) => {
         for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
     };
@@ -333,15 +328,32 @@ function initWavBeep() {
     view.setUint16(34, 8, true);
     writeStr(36, 'data');
     view.setUint32(40, numSamples, true);
-    const freq = 2350;
+
+    const freq = 2300;
     for (let i = 0; i < numSamples; i++) {
-        view.setUint8(44 + i, Math.sin(2 * Math.PI * freq * (i / sampleRate)) >= 0 ? 220 : 35);
+        const wave = Math.sin(2 * Math.PI * freq * (i / sampleRate)) >= 0 ? 220 : 36;
+        view.setUint8(44 + i, wave);
     }
-    beepAudioEl = new Audio(URL.createObjectURL(new Blob([buffer], { type: 'audio/wav' })));
+
+    const blob = new Blob([buffer], { type: 'audio/wav' });
+    beepAudioEl = new Audio(URL.createObjectURL(blob));
     beepAudioEl.playsInline = true;
 }
 
-function playTone(freq, type = 'sine', dur = 0.06, vol = 0.07) {
+function triggerIosScanBeep(silent = false) {
+    if (!appState.soundOn && !silent) return;
+    try {
+        initWavBeep();
+        if (beepAudioEl) {
+            beepAudioEl.volume = silent ? 0.01 : 1.0;
+            beepAudioEl.currentTime = 0;
+            beepAudioEl.play().catch(() => {});
+        }
+    } catch (e) {}
+    playTone(2350, 'square', 0.08, silent ? 0.001 : 0.16);
+}
+
+function playTone(freq, type = 'square', dur = 0.07, vol = 0.08) {
     if (!appState.soundOn) return;
     try {
         if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -360,142 +372,377 @@ function playTone(freq, type = 'sine', dur = 0.06, vol = 0.07) {
 }
 
 const SFX = {
-    scan: () => {
-        if (!appState.soundOn) return;
-        try { initWavBeep(); beepAudioEl.currentTime = 0; beepAudioEl.play().catch(()=>{}); } catch(e){}
-        playTone(2350, 'square', 0.08, 0.14);
-    },
-    key: () => playTone(980, 'sine', 0.04, 0.05),
-    next: () => { playTone(1046, 'sine', 0.06, 0.07); setTimeout(() => playTone(1318, 'sine', 0.09, 0.07), 60); },
-    err: () => playTone(260, 'sawtooth', 0.14, 0.09)
+    scan:    () => triggerIosScanBeep(false),
+    key:     () => playTone(980, 'sine', 0.04, 0.05),
+    next:    () => { playTone(1046, 'sine', 0.06, 0.07); setTimeout(() => playTone(1318, 'sine', 0.09, 0.07), 65); },
+    voiceOk: () => playTone(1568, 'triangle', 0.08, 0.07),
+    err:     () => { playTone(260, 'sawtooth', 0.14, 0.08); }
 };
 
 function toggleSound() {
     appState.soundOn = !appState.soundOn;
-    document.getElementById('btn-sound').textContent = appState.soundOn ? '🔊音' : '🔇音';
+    document.getElementById('btn-sound').textContent = appState.soundOn ? '🔊音:ON' : '🔇音:OFF';
     if (appState.soundOn) SFX.key();
 }
 
 // ==========================================================
-// 音声ガイド（TTS）＆ハンズフリー音声認識（iOS / Android対応）
+// 2. 明るい声の音声読み上げエンジン（SpeechSynthesis + 初回タップ自動アンロック）
 // ==========================================================
 let isSpeaking = false;
-let recognition = null;
-let speechWatchdog = null;
+let speechWatchdogTimer = null;
+let cachedBrightJaVoice = null;
+let ttsUnlocked = false;
+
+/**
+ * 日本語の明るく聞き取りやすい音声（Kyoko / O-ren / Google 日本語 / Haruka等）を自動選択
+ */
+function selectBrightJapaneseVoice() {
+    if (!('speechSynthesis' in window)) return null;
+    const voices = window.speechSynthesis.getVoices();
+    if (!voices || voices.length === 0) return null;
+
+    const jaVoices = voices.filter(v => v.lang && (v.lang.includes('ja') || v.lang.includes('JP')));
+    if (jaVoices.length === 0) return null;
+
+    // 明るくハキハキした声の優先順リスト
+    const preferredKeywords = ['Kyoko', 'O-ren', 'Google 日本語', 'Haruka', 'Nanami', 'Siri', 'Female'];
+    for (const kw of preferredKeywords) {
+        const hit = jaVoices.find(v => v.name && v.name.includes(kw));
+        if (hit) return hit;
+    }
+    return jaVoices[0];
+}
+
+if ('speechSynthesis' in window) {
+    window.speechSynthesis.onvoiceschanged = () => {
+        cachedBrightJaVoice = selectBrightJapaneseVoice();
+    };
+}
+
+/**
+ * iOS Safari / Android Chromeの「初回ユーザー操作なしでの音声ブロック」を最初の画面タップで自動解除
+ */
+function unlockTtsOnFirstTap() {
+    if (ttsUnlocked || !('speechSynthesis' in window)) return;
+    ttsUnlocked = true;
+    try {
+        cachedBrightJaVoice = selectBrightJapaneseVoice();
+        const silentUtter = new SpeechSynthesisUtterance('');
+        silentUtter.volume = 0;
+        silentUtter.lang = 'ja-JP';
+        window.speechSynthesis.speak(silentUtter);
+    } catch (e) {}
+}
+window.addEventListener('touchstart', unlockTtsOnFirstTap, { once: true, passive: true });
+window.addEventListener('click', unlockTtsOnFirstTap, { once: true, passive: true });
 
 function toggleTts() {
     appState.ttsOn = !appState.ttsOn;
-    document.getElementById('btn-tts').textContent = appState.ttsOn ? '🗣️声' : '🔇声';
+    const btn = document.getElementById('btn-tts');
+    btn.textContent = appState.ttsOn ? '🗣️声:ON' : '🔇声:OFF';
+    btn.className = appState.ttsOn
+        ? 'bg-amber-600 text-white font-bold text-[11px] px-1.5 py-1 rounded'
+        : 'bg-slate-800 border border-slate-700 text-slate-300 text-[11px] px-1.5 py-1 rounded';
+
     if (!appState.ttsOn && window.speechSynthesis) {
         window.speechSynthesis.cancel();
         isSpeaking = false;
     } else {
-        speakCurrentRecord(true);
+        speakText('音声ガイドをオンにしました！', true);
     }
 }
 
-function speakText(text, force = false) {
-    if ((!appState.ttsOn && !force) || !('speechSynthesis' in window)) return;
+function startRecognitionSafely() {
+    if (!appState.isListening || isSpeaking || !recognition) return;
     try {
-        clearTimeout(speechWatchdog);
+        recognition.start();
+    } catch (e) {}
+}
+
+function speakText(text, force = false) {
+    const subEl = document.getElementById('tts-subtitle');
+    if (subEl) subEl.textContent = text;
+
+    if ((!appState.ttsOn && !force) || !('speechSynthesis' in window)) {
+        isSpeaking = false;
+        startRecognitionSafely();
+        return;
+    }
+
+    try {
+        clearTimeout(speechWatchdogTimer);
         window.speechSynthesis.cancel();
+        if (window.speechSynthesis.paused) {
+            window.speechSynthesis.resume();
+        }
         isSpeaking = true;
-        if (recognition) { try { recognition.abort(); } catch (e) {} }
-        const u = new SpeechSynthesisUtterance(text);
-        u.lang = 'ja-JP';
-        u.rate = 1.15;
-        const done = () => {
-            clearTimeout(speechWatchdog);
+        if (recognition) {
+            try { recognition.abort(); } catch (e) {}
+        }
+
+        const utter = new SpeechSynthesisUtterance(text);
+        utter.lang = 'ja-JP';
+        if (!cachedBrightJaVoice) cachedBrightJaVoice = selectBrightJapaneseVoice();
+        if (cachedBrightJaVoice) utter.voice = cachedBrightJaVoice;
+
+        // ★明るくハキハキとしたトーン（ピッチ高め 1.22・テンポ 1.16）
+        utter.rate = 1.16;
+        utter.pitch = 1.22;
+        utter.volume = 1.0;
+
+        const finishSpeak = () => {
+            clearTimeout(speechWatchdogTimer);
+            if (!isSpeaking) return;
             isSpeaking = false;
-            if (appState.isListening && recognition) {
-                setTimeout(() => { try { recognition.start(); } catch(e){} }, 250);
+            if (appState.isListening) {
+                const trEl = document.getElementById('voice-transcript');
+                if (trEl) trEl.textContent = '👂 聞き取り中...（数字 または「次へ」をどうぞ）';
+                setTimeout(startRecognitionSafely, 250);
             }
         };
-        u.onend = done;
-        u.onerror = done;
-        speechWatchdog = setTimeout(done, Math.max(1800, text.length * 160));
-        window.speechSynthesis.speak(u);
+
+        utter.onend = finishSpeak;
+        utter.onerror = finishSpeak;
+
+        const estDuration = Math.max(1800, text.length * 160);
+        speechWatchdogTimer = setTimeout(finishSpeak, estDuration);
+
+        window.speechSynthesis.speak(utter);
     } catch (e) {
         isSpeaking = false;
+        startRecognitionSafely();
     }
 }
 
 function speakCurrentRecord(force = false, prefix = '') {
     const rec = getCurrentRecord();
     if (!rec) return;
-    speakText(`${prefix}${rec.area}、${rec.shelf}。${rec.name}、単位は${rec.unit}。前回${rec.prevQty}${rec.unit}。`, force);
+    const msg = `${prefix}${rec.area}、${rec.shelf}、${rec.level}。${rec.name}、単位は${rec.unit}。前回 ${rec.prevQty}${rec.unit}。数量をどうぞ！`;
+    speakText(msg, force);
 }
 
+// ==========================================================
+// 3. 連続音声認識エンジン（サンプルと同一のiPhone/Android安定方式）
+// ==========================================================
+let recognition = null;
+let lastProcessedTranscript = '';
+let lastProcessedTime = 0;
+
 function toggleVoiceRecognition() {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) {
-        showToast('このブラウザは音声認識非対応です');
+    unlockTtsOnFirstTap();
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+        showToast('このブラウザは音声認識APIに非対応です');
+        speakCurrentRecord(true);
         return;
     }
-    const btn = document.getElementById('btn-voice-toggle');
+
     if (appState.isListening) {
         appState.isListening = false;
-        if (recognition) { try { recognition.abort(); } catch (e) {} }
-        btn.classList.remove('mic-active', 'bg-red-700');
-        btn.textContent = '🎤声';
-        showToast('音声入力を停止しました');
+        isSpeaking = false;
+        clearTimeout(speechWatchdogTimer);
+        if (recognition) {
+            try { recognition.abort(); } catch (e) {}
+        }
+        updateVoiceUI(false);
         return;
     }
 
-    recognition = new SR();
+    recognition = new SpeechRecognition();
     recognition.lang = 'ja-JP';
     recognition.continuous = false;
-    recognition.interimResults = false;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 3;
 
-    recognition.onresult = (e) => {
-        if (isSpeaking) return;
-        const transcript = e.results[e.results.length - 1][0].transcript.trim();
-        handleVoiceCommand(transcript);
-    };
-    recognition.onend = () => {
-        if (appState.isListening && !isSpeaking) {
-            setTimeout(() => { try { recognition.start(); } catch (err) {} }, 200);
+    recognition.onstart = () => {
+        if (!isSpeaking) {
+            const trEl = document.getElementById('voice-transcript');
+            if (trEl) trEl.textContent = '👂 聞き取り中...（数字 / 次へ / 前回同数）';
         }
     };
-    recognition.onerror = (e) => {
-        if (e.error === 'not-allowed') {
+
+    recognition.onresult = (event) => {
+        if (isSpeaking) return;
+        let interimText = '';
+        let finalText = '';
+
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+            const res = event.results[i];
+            if (res.isFinal) {
+                finalText += res[0].transcript;
+            } else {
+                interimText += res[0].transcript;
+            }
+        }
+
+        const trEl = document.getElementById('voice-transcript');
+        if (interimText && trEl) {
+            trEl.textContent = `認識中: 「${interimText}」...`;
+        }
+
+        if (finalText) {
+            const cleaned = finalText.trim();
+            const now = Date.now();
+            if (cleaned && !(cleaned === lastProcessedTranscript && now - lastProcessedTime < 1200)) {
+                lastProcessedTranscript = cleaned;
+                lastProcessedTime = now;
+                processVoiceCommand(cleaned);
+            }
+        }
+    };
+
+    recognition.onerror = (event) => {
+        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
             appState.isListening = false;
-            btn.classList.remove('mic-active', 'bg-red-700');
-            showToast('マイク権限を許可してください');
+            updateVoiceUI(false);
+            showToast('⚠️ マイクの使用が許可されていません。ブラウザ設定でマイクを許可してください');
+            return;
+        }
+        if (appState.isListening && !isSpeaking) {
+            setTimeout(startRecognitionSafely, 300);
+        }
+    };
+
+    recognition.onend = () => {
+        if (appState.isListening && !isSpeaking) {
+            setTimeout(startRecognitionSafely, 150);
+        } else if (!appState.isListening) {
+            updateVoiceUI(false);
         }
     };
 
     appState.isListening = true;
-    btn.classList.add('mic-active', 'bg-red-700');
-    btn.textContent = '🎤聴取';
-    try { recognition.start(); } catch (e) {}
-    speakCurrentRecord(true, 'ハンズフリー開始。');
+    updateVoiceUI(true);
+    showToast('🎤 ハンズフリー音声入力を開始しました');
+    startRecognitionSafely();
+    setTimeout(() => {
+        if (appState.isListening) speakCurrentRecord(true, '音声入力を開始します！');
+    }, 350);
 }
 
-function handleVoiceCommand(text) {
-    showToast(`🎤 認識: 「${text}」`);
-    if (/次|確定|OK|オッケー|はい/i.test(text)) {
-        confirmAndNextRecord();
+function updateVoiceUI(active) {
+    const btn = document.getElementById('btn-voice-toggle');
+    const label = document.getElementById('voice-btn-label');
+    const dot = document.getElementById('voice-status-dot');
+    const bar = document.getElementById('voice-transcript-bar');
+    if (active) {
+        btn.classList.add('mic-active', 'bg-red-700');
+        if (label) label.textContent = '停止';
+        if (dot) dot.className = 'w-2.5 h-2.5 rounded-full bg-red-500 animate-ping shrink-0';
+        if (bar) bar.classList.remove('hidden');
+    } else {
+        btn.classList.remove('mic-active', 'bg-red-700');
+        if (label) label.textContent = '音声';
+        if (dot) dot.className = 'w-2 h-2 rounded-full bg-slate-500 shrink-0';
+        if (bar) bar.classList.add('hidden');
+    }
+}
+
+function processVoiceCommand(rawText) {
+    const trEl = document.getElementById('voice-transcript');
+    if (trEl) trEl.textContent = `✅ 認識: 「${rawText}」`;
+
+    const rec = getCurrentRecord();
+    const unit = rec ? rec.unit : '個';
+
+    if (/もう一回|もう一度|もういっかい|もういちど|読み上げ|よみあげ|なに|何/.test(rawText)) {
+        speakCurrentRecord(true);
         return;
     }
-    if (/戻|前/.test(text)) {
+
+    if (/戻る|もどる|前の|まえの/.test(rawText)) {
         movePrevRecord();
         return;
     }
-    if (/同数|同じ/.test(text)) {
-        copyPrevQty();
+
+    if (/クリア|リセット|取り消し|とりけし|ゼロ|ぜろ/.test(rawText)) {
+        clearQtyInput();
+        SFX.voiceOk();
+        speakText('ゼロにクリアしました！数量をどうぞ');
         return;
     }
-    const numMatch = text.replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0)).match(/\d+/);
-    if (numMatch) {
-        appState.inputBuffer = numMatch[0];
-        applyBufferToCurrentRecord();
-        speakText(`${numMatch[0]}。よければ次へと言ってください`);
+
+    if (/前回|ぜんかい|同じ|おなじ/.test(rawText)) {
+        copyPrevQty();
+        SFX.voiceOk();
+        if (/次|つぎ|確定|かくてい|はい/.test(rawText)) {
+            setTimeout(confirmAndNextRecord, 250);
+        } else {
+            speakText(`前回と同じ、${rec.prevQty}${unit}！よろしければ、次へ、と言ってください`);
+        }
+        return;
     }
+
+    const parsedNum = extractJapaneseNumber(rawText);
+    if (parsedNum !== null) {
+        SFX.voiceOk();
+        appState.inputBuffer = String(parsedNum);
+        applyBufferToCurrentRecord();
+
+        if (/次|つぎ|確定|かくてい|オッケー|OK|はい/i.test(rawText)) {
+            setTimeout(confirmAndNextRecord, 250);
+        } else {
+            speakText(`${parsedNum}${unit}！よろしければ、次へ、と言ってください`);
+        }
+        return;
+    }
+
+    if (/次|つぎ|確定|かくてい|オッケー|おっけー|OK|はい|完了|かんりょう/i.test(rawText)) {
+        confirmAndNextRecord();
+        return;
+    }
+
+    if (trEl) trEl.textContent = `❓ 「${rawText}」（数字 または「次へ」と話してください）`;
+}
+
+function extractJapaneseNumber(str) {
+    let norm = str
+        .replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0))
+        .replace(/[\u30a1-\u30f6]/g, m => String.fromCharCode(m.charCodeAt(0) - 0x60));
+
+    const digitMatch = norm.match(/\d+/);
+    if (digitMatch) return parseInt(digitMatch[0], 10);
+
+    const hiraReplacements = [
+        ['さんびゃく', '三百'], ['ろっぴゃく', '六百'], ['はっぴゃく', '八百'], ['ひゃく', '百'],
+        ['じゅう', '十'],
+        ['ぜろ', '〇'], ['れい', '〇'],
+        ['いち', '一'], ['ひと', '一'],
+        ['に', '二'], ['ふた', '二'],
+        ['さん', '三'], ['みっ', '三'],
+        ['よん', '四'], ['し', '四'], ['よっ', '四'],
+        ['ご', '五'], ['いつ', '五'],
+        ['ろく', '六'], ['むっ', '六'],
+        ['なな', '七'], ['しち', '七'],
+        ['はち', '八'], ['やっ', '八'],
+        ['きゅう', '九'], ['く', '九']
+    ];
+    for (const [hira, kanji] of hiraReplacements) {
+        norm = norm.split(hira).join(kanji);
+    }
+
+    const kanjiMap = { '零':0, '〇':0, '一':1, '二':2, '三':3, '四':4, '五':5, '六':6, '七':7, '八':8, '九':9 };
+    let total = 0, current = 0, matched = false;
+    for (const ch of norm) {
+        if (kanjiMap[ch] !== undefined) {
+            current = kanjiMap[ch];
+            matched = true;
+        } else if (ch === '十') {
+            total += (current || 1) * 10;
+            current = 0;
+            matched = true;
+        } else if (ch === '百') {
+            total += (current || 1) * 100;
+            current = 0;
+            matched = true;
+        }
+    }
+    total += current;
+    return matched ? total : null;
 }
 
 // ==========================================================
-// カメラスキャナー（連続スキャン ＋ OS標準カメラ撮影スキャン両対応）
+// 4. サンプル(teraoka (1).html)完全移植：全方向カメラスキャナー制御
 // ==========================================================
 let mediaStream = null;
 let offscreenVideo = null;
@@ -505,21 +752,33 @@ let digitalZoom = 1.6;
 let previewLoopId = null;
 let decodeTimerId = null;
 let isDecodingFrame = false;
-let scanParity = 0;
-let lastCode = '';
-let hitCount = 0;
+let scanFrameParity = 0;
+let lastCandidateCode = '';
+let candidateHitCount = 0;
 
 function calcCoverCrop(vw, vh, destW, destH, zoom) {
     const srcRatio = vw / vh;
     const destRatio = destW / destH;
-    let baseW = srcRatio > destRatio ? vh * destRatio : vw;
-    let baseH = srcRatio > destRatio ? vh : vw / destRatio;
+    let baseW, baseH;
+    if (srcRatio > destRatio) {
+        baseH = vh;
+        baseW = vh * destRatio;
+    } else {
+        baseW = vw;
+        baseH = vw / destRatio;
+    }
     const cropW = baseW / zoom;
     const cropH = baseH / zoom;
-    return { cropX: (vw - cropW) / 2, cropY: (vh - cropH) / 2, cropW, cropH };
+    return {
+        cropX: (vw - cropW) / 2,
+        cropY: (vh - cropH) / 2,
+        cropW,
+        cropH
+    };
 }
 
 async function toggleCameraScanner() {
+    unlockTtsOnFirstTap();
     if (isCameraRunning) {
         await stopCameraScanner();
     } else {
@@ -529,129 +788,162 @@ async function toggleCameraScanner() {
 
 async function startCameraScanner() {
     if (isCameraRunning) return;
+    triggerIosScanBeep(true);
+
     try {
         offscreenVideo = document.createElement('video');
         offscreenVideo.setAttribute('playsinline', '');
+        offscreenVideo.setAttribute('webkit-playsinline', 'true');
         offscreenVideo.muted = true;
         offscreenVideo.autoplay = true;
 
         mediaStream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+            video: {
+                facingMode: { ideal: 'environment' },
+                width: { ideal: 1280 },
+                height: { ideal: 720 }
+            },
             audio: false
         });
+
         offscreenVideo.srcObject = mediaStream;
         await offscreenVideo.play();
 
         isCameraRunning = true;
         document.getElementById('camera-wrapper').classList.remove('hidden');
+        const btn = document.getElementById('btn-cam-toggle');
+        btn.classList.remove('bg-emerald-600');
+        btn.classList.add('bg-slate-700');
         document.getElementById('cam-btn-label').textContent = '停止';
+
         resumeCameraScan();
 
         const previewCanvas = document.getElementById('preview-canvas');
         const previewCtx = previewCanvas.getContext('2d', { alpha: false });
 
-        const renderLoop = () => {
+        const renderPreview = () => {
             if (!isCameraRunning || !offscreenVideo) return;
-            if (offscreenVideo.readyState >= 2 && offscreenVideo.videoWidth > 0) {
+            if (offscreenVideo.readyState >= offscreenVideo.HAVE_CURRENT_DATA && offscreenVideo.videoWidth > 0) {
+                const vw = offscreenVideo.videoWidth;
+                const vh = offscreenVideo.videoHeight;
                 const rect = previewCanvas.getBoundingClientRect();
-                const targetW = Math.max(260, Math.round(rect.width * 1.5));
-                const targetH = Math.max(130, Math.round(rect.height * 1.5));
+                const dpr = Math.min(window.devicePixelRatio || 1, 2);
+                const targetW = Math.max(280, Math.round(rect.width * dpr));
+                const targetH = Math.max(160, Math.round(rect.height * dpr));
+
                 if (previewCanvas.width !== targetW || previewCanvas.height !== targetH) {
                     previewCanvas.width = targetW;
                     previewCanvas.height = targetH;
                 }
-                const { cropX, cropY, cropW, cropH } = calcCoverCrop(offscreenVideo.videoWidth, offscreenVideo.videoHeight, targetW, targetH, digitalZoom);
+
+                const { cropX, cropY, cropW, cropH } = calcCoverCrop(vw, vh, targetW, targetH, digitalZoom);
                 previewCtx.drawImage(offscreenVideo, cropX, cropY, cropW, cropH, 0, 0, targetW, targetH);
             }
-            previewLoopId = requestAnimationFrame(renderLoop);
+            previewLoopId = requestAnimationFrame(renderPreview);
         };
-        renderLoop();
+        renderPreview();
 
         const decodeCanvas = document.getElementById('decode-canvas');
         const decodeCtx = decodeCanvas.getContext('2d', { willReadFrequently: true });
 
         decodeTimerId = setInterval(() => {
-            if (!isCameraRunning || isScanPaused || isDecodingFrame || !offscreenVideo || offscreenVideo.videoWidth === 0) return;
+            if (!isCameraRunning || isScanPaused || isDecodingFrame || !offscreenVideo) return;
+            if (offscreenVideo.readyState < offscreenVideo.HAVE_ENOUGH_DATA || offscreenVideo.videoWidth === 0) return;
+
             isDecodingFrame = true;
-            const { cropX, cropY, cropW, cropH } = calcCoverCrop(offscreenVideo.videoWidth, offscreenVideo.videoHeight, 320, 160, digitalZoom);
-            const rotate90 = (scanParity++ % 2 === 1);
-            decodeCanvas.width = rotate90 ? 280 : 480;
-            decodeCanvas.height = rotate90 ? 480 : 280;
-            decodeCtx.save();
-            if (rotate90) {
+            const vw = offscreenVideo.videoWidth;
+            const vh = offscreenVideo.videoHeight;
+            const rect = previewCanvas.getBoundingClientRect();
+            const destW = Math.max(280, rect.width);
+            const destH = Math.max(160, rect.height);
+
+            const { cropX, cropY, cropW, cropH } = calcCoverCrop(vw, vh, destW, destH, digitalZoom);
+            const bandX = Math.floor(cropX + cropW * 0.14);
+            const bandY = Math.floor(cropY + cropH * 0.12);
+            const bandW = Math.floor(cropW * 0.72);
+            const bandH = Math.floor(cropH * 0.76);
+
+            const rotate90 = (scanFrameParity % 2 === 1);
+            scanFrameParity++;
+            const targetSize = 520;
+
+            if (!rotate90) {
+                decodeCanvas.width = targetSize;
+                decodeCanvas.height = Math.max(240, Math.floor(targetSize * (bandH / bandW)));
+                decodeCtx.setTransform(1, 0, 0, 1, 0, 0);
+                decodeCtx.drawImage(offscreenVideo, bandX, bandY, bandW, bandH, 0, 0, decodeCanvas.width, decodeCanvas.height);
+            } else {
+                decodeCanvas.width = Math.max(240, Math.floor(targetSize * (bandH / bandW)));
+                decodeCanvas.height = targetSize;
+                decodeCtx.save();
                 decodeCtx.translate(decodeCanvas.width / 2, decodeCanvas.height / 2);
                 decodeCtx.rotate(Math.PI / 2);
-                decodeCtx.drawImage(offscreenVideo, cropX, cropY, cropW, cropH, -240, -140, 480, 280);
-            } else {
-                decodeCtx.drawImage(offscreenVideo, cropX, cropY, cropW, cropH, 0, 0, 480, 280);
+                decodeCtx.drawImage(offscreenVideo, bandX, bandY, bandW, bandH, -decodeCanvas.height / 2, -decodeCanvas.width / 2, decodeCanvas.height, decodeCanvas.width);
+                decodeCtx.restore();
             }
-            decodeCtx.restore();
+
+            // ★サンプルと同一のコントラスト強調処理（これで全方向の読取精度が劇的に向上）
+            enhanceBarcodeContrast(decodeCtx, decodeCanvas.width, decodeCanvas.height);
+            const dataUrl = decodeCanvas.toDataURL('image/jpeg', 0.85);
 
             Quagga.decodeSingle({
-                src: decodeCanvas.toDataURL('image/jpeg', 0.82),
+                src: dataUrl,
                 numOfWorkers: 0,
                 locate: true,
-                inputStream: { size: 480 },
-                decoder: { readers: ['ean_reader', 'ean_8_reader', 'upc_reader', 'code_128_reader'] }
-            }, (res) => {
+                inputStream: { size: Math.max(decodeCanvas.width, decodeCanvas.height) },
+                decoder: {
+                    readers: ['ean_reader', 'ean_8_reader', 'upc_reader', 'code_128_reader']
+                }
+            }, (result) => {
                 isDecodingFrame = false;
                 if (!isCameraRunning || isScanPaused) return;
-                if (res && res.codeResult && res.codeResult.code) {
-                    const code = res.codeResult.code;
-                    hitCount = (code === lastCode) ? hitCount + 1 : 1;
-                    lastCode = code;
-                    if (hitCount >= 2) {
-                        hitCount = 0;
+                if (result && result.codeResult && result.codeResult.code) {
+                    const code = result.codeResult.code;
+                    if (code === lastCandidateCode) {
+                        candidateHitCount++;
+                    } else {
+                        lastCandidateCode = code;
+                        candidateHitCount = 1;
+                    }
+                    if (candidateHitCount >= 2) {
+                        lastCandidateCode = '';
+                        candidateHitCount = 0;
                         pauseCameraScan();
                         handleBarcodeScan(code);
                     }
                 }
             });
-        }, 75);
+        }, 65);
     } catch (err) {
-        showToast('連続カメラを起動できません。隣の「📸写す」ボタンをお使いください');
+        showToast('カメラ起動エラー: ' + err.message);
         await stopCameraScanner();
     }
 }
 
-/**
- * OS標準カメラシャッター（📸写す）で撮影した写真からバーコードを高速解析
- */
-function handleNativePhotoScan(inputEl) {
-    const file = inputEl.files && inputEl.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (e) => {
-        const imgUrl = e.target.result;
-        Quagga.decodeSingle({
-            src: imgUrl,
-            numOfWorkers: 0,
-            locate: true,
-            inputStream: { size: 800 },
-            decoder: { readers: ['ean_reader', 'ean_8_reader', 'upc_reader', 'code_128_reader'] }
-        }, (result) => {
-            inputEl.value = '';
-            if (result && result.codeResult && result.codeResult.code) {
-                handleBarcodeScan(result.codeResult.code);
-            } else {
-                SFX.err();
-                showToast('バーコードを読み取れませんでした。もう少し近づいて撮影してください');
-            }
-        });
-    };
-    reader.readAsDataURL(file);
+function enhanceBarcodeContrast(ctx, w, h) {
+    const imgData = ctx.getImageData(0, 0, w, h);
+    const data = imgData.data;
+    const contrast = 1.65;
+    const intercept = 128 * (1 - contrast);
+    for (let i = 0; i < data.length; i += 4) {
+        const gray = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+        let adj = gray * contrast + intercept;
+        data[i] = data[i + 1] = data[i + 2] = adj < 0 ? 0 : adj > 255 ? 255 : adj;
+    }
+    ctx.putImageData(imgData, 0, 0);
 }
 
-function setDigitalZoom(z) {
-    digitalZoom = z;
+function setDigitalZoom(zoom) {
+    digitalZoom = zoom;
     ['z-btn-10', 'z-btn-16', 'z-btn-22'].forEach(id => {
-        document.getElementById(id).className = 'bg-slate-900/80 text-white text-[10px] font-bold px-1.5 py-0.5 rounded';
+        document.getElementById(id).className = 'bg-slate-900/85 text-white border border-slate-600 text-[10px] font-bold px-2 py-0.5 rounded';
     });
-    const active = z === 1.0 ? 'z-btn-10' : z === 1.6 ? 'z-btn-16' : 'z-btn-22';
-    document.getElementById(active).className = 'bg-emerald-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded';
+    const activeId = zoom === 1.0 ? 'z-btn-10' : zoom === 1.6 ? 'z-btn-16' : 'z-btn-22';
+    document.getElementById(activeId).className = 'bg-emerald-600 text-white text-[10px] font-bold px-2 py-0.5 rounded';
 }
 
 function pauseCameraScan() {
+    if (!isCameraRunning) return;
     isScanPaused = true;
     document.getElementById('scan-overlay').classList.add('hidden');
     document.getElementById('scan-paused-overlay').classList.remove('hidden');
@@ -659,17 +951,30 @@ function pauseCameraScan() {
 
 function resumeCameraScan() {
     isScanPaused = false;
-    lastCode = '';
-    hitCount = 0;
-    document.getElementById('scan-overlay').classList.remove('hidden');
-    document.getElementById('scan-paused-overlay').classList.add('hidden');
+    lastCandidateCode = '';
+    candidateHitCount = 0;
+    if (isCameraRunning) {
+        document.getElementById('scan-overlay').classList.remove('hidden');
+        document.getElementById('scan-paused-overlay').classList.add('hidden');
+    }
 }
 
 async function stopCameraScanner() {
     isCameraRunning = false;
-    if (previewLoopId) cancelAnimationFrame(previewLoopId);
-    if (decodeTimerId) clearInterval(decodeTimerId);
-    if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
+    isScanPaused = false;
+    if (previewLoopId) { cancelAnimationFrame(previewLoopId); previewLoopId = null; }
+    if (decodeTimerId) { clearInterval(decodeTimerId); decodeTimerId = null; }
+    if (mediaStream) {
+        mediaStream.getTracks().forEach(t => t.stop());
+        mediaStream = null;
+    }
+    if (offscreenVideo) {
+        offscreenVideo.srcObject = null;
+        offscreenVideo = null;
+    }
     document.getElementById('camera-wrapper').classList.add('hidden');
-    document.getElementById('cam-btn-label').textContent = '連続カメラ';
+    const btn = document.getElementById('btn-cam-toggle');
+    btn.classList.remove('bg-slate-700');
+    btn.classList.add('bg-emerald-600');
+    document.getElementById('cam-btn-label').textContent = 'カメラ';
 }
