@@ -1,6 +1,6 @@
 /**
- * app-ui.js (v6)
- * ・モーダルを閉じた際のカメラモード自動復帰対応
+ * app-ui.js (v7)
+ * ・ノンストップ連続スキャン連動（モーダルを閉じれば即座にカメラ読取再開）
  * ・UIの「⚙️接続」ボタンからGASのURLを後から安全に登録・保存・共有リンク生成する機能
  * ・スマホ上部テンキー操作・後から発見した在庫の追加履歴管理・PC管理者ダッシュボード・完全バックアップ機能
  */
@@ -22,7 +22,7 @@ function openGasConfigModal() {
     const currentUrl = getActiveGasUrl();
     const isConnected = Boolean(currentUrl);
 
-    document.getElementById('modal-title').textContent = '⚙️ スプレッドシート(GAS) 接続設定';
+    document.getElementById('modal-title').textContent = `⚙️ スプレッドシート(GAS) 接続設定 (${APP_VERSION})`;
     document.getElementById('modal-body').innerHTML = `
         <div class="space-y-3">
             <div class="p-3 rounded-xl border ${isConnected ? 'bg-emerald-50 border-emerald-300' : 'bg-amber-50 border-amber-300'} text-xs space-y-1">
@@ -334,7 +334,6 @@ function confirmAndNextRecord() {
     SFX.next();
 
     syncRecordToGasSheet(rec, null);
-    if (isCameraRunning) resumeCameraScan();
 
     const list = getFilteredMobileRecords();
     const pool = list.length > 0 ? list : inventoryRecords;
@@ -355,7 +354,6 @@ function confirmAndNextRecord() {
 function movePrevRecord() {
     SFX.key();
     appState.inputBuffer = '';
-    if (isCameraRunning) resumeCameraScan();
     const list = getFilteredMobileRecords();
     const pool = list.length > 0 ? list : inventoryRecords;
     const idx = pool.findIndex(r => r.id === appState.selectedRecordId);
@@ -991,16 +989,16 @@ async function buildFullSourceBundleText() {
     let coreJs = '';
     let uiJs = '';
     try {
-        const r1 = await fetch('app-core.js?v=6');
+        const r1 = await fetch('app-core.js?v=7');
         if (r1.ok) coreJs = await r1.text();
     } catch (e) {}
     try {
-        const r2 = await fetch('app-ui.js?v=6');
+        const r2 = await fetch('app-ui.js?v=7');
         if (r2.ok) uiJs = await r2.text();
     } catch (e) {}
 
     if (coreJs && uiJs) {
-        return `<!-- ===== index.html ===== -->\n<!DOCTYPE html>\n${htmlContent}\n\n/* ===== app-core.js ===== */\n${coreJs}\n\n/* ===== app-ui.js ===== */\n${uiJs}`;
+        return `<!-- ===== index.html (${APP_VERSION}) ===== -->\n<!DOCTYPE html>\n${htmlContent}\n\n/* ===== app-core.js (${APP_VERSION}) ===== */\n${coreJs}\n\n/* ===== app-ui.js (${APP_VERSION}) ===== */\n${uiJs}`;
     }
     return `<!DOCTYPE html>\n${htmlContent}`;
 }
@@ -1009,13 +1007,14 @@ function openBackupModal() {
     SFX.key();
     const safeMaster = Object.assign({}, masterData, { gasWebhookUrl: '' });
     const fullStateJson = JSON.stringify({
+        version: APP_VERSION,
         exportedAt: formatNow(),
         masterData: safeMaster,
         inventoryRecords,
         addStockLogs
     }, null, 2);
 
-    document.getElementById('modal-title').textContent = '💾 バックアップ ＆ ソースコード全文保存';
+    document.getElementById('modal-title').textContent = `💾 バックアップ ＆ ソースコード全文保存 (${APP_VERSION})`;
     document.getElementById('modal-body').innerHTML = `
         <p class="text-xs text-slate-600">
             現在の棚卸しデータ全体（マスタ・場所別実績・後から追加履歴）や、アプリケーションのソースコード全文をコピー・ファイル保存できます。
@@ -1063,7 +1062,7 @@ function downloadBackupDataJson() {
     const blob = new Blob([text], { type: 'application/json;charset=utf-8;' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `inventory_backup_${Date.now()}.json`;
+    a.download = `inventory_backup_${APP_VERSION}_${Date.now()}.json`;
     a.click();
     showToast('バックアップJSONファイルをダウンロードしました');
 }
@@ -1082,7 +1081,7 @@ async function downloadAppSourceCode() {
     const blob = new Blob([code], { type: 'text/html;charset=utf-8;' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `smart_inventory_app_backup_${Date.now()}.html`;
+    a.download = `smart_inventory_app_${APP_VERSION}_${Date.now()}.html`;
     a.click();
     showToast('アプリのソースコードファイルをダウンロードしました');
 }
@@ -1124,8 +1123,9 @@ function closeModal() {
     const el = document.getElementById('modal-overlay');
     el.classList.add('hidden');
     el.classList.remove('flex');
-    if (typeof isCameraRunning !== 'undefined' && isCameraRunning && isScanPaused) {
-        resumeCameraScan();
+    // モーダルを閉じたら直前の読取候補バッファをクリアして即座に次のスキャンを受け入れ可能にする
+    if (typeof recentScanHits !== 'undefined') {
+        recentScanHits = [];
     }
 }
 
