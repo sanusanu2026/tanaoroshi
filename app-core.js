@@ -1,12 +1,13 @@
 /**
- * app-core.js (v6)
- * ・バーコード誤読防止3重フィルター（JAN専用 ean_reader/ean_8_reader + エラー率<0.14チェック + チェックデジット + 3回連続一致）
- * ・マイクと読み上げの排他制御（スマホのオーディオ衝突を完全解消＋読み上げ極短化＋バーのタップで即割り込み）
- * ・明るい声の即時発声（pitch=1.25 / rate=1.18）
- * ・公開コード内にGAS URLを持たない安全設計（localStorage / URLパラメータ自動取得）
+ * app-core.js (v7)
+ * ・ノンストップ連続カメラスキャン（一時停止画面を廃止、同一JANのみ2.5秒クールダウン、別商品は即連続読取）
+ * ・バーコード高精度化（連続オートフォーカス有効化 + 標準/高コントラスト4パターン交互解析 + 直近1秒間の多数決2回一致）
+ * ・モーダル表示中のみ自動スキップ＆解析詰まり時の1.5秒自動リセット保護
+ * ・マイクと読み上げの排他制御＋タップ即割り込み＋明るい声（pitch=1.25 / rate=1.18）
  */
 
-const STORAGE_KEY = 'smart_inventory_solution_b_v6';
+const APP_VERSION = 'v7';
+const STORAGE_KEY = 'smart_inventory_solution_b_v7';
 const GAS_URL_STORAGE_KEY = 'smart_inventory_gas_api_url_v4';
 
 const defaultMaster = {
@@ -429,7 +430,7 @@ function toggleSound() {
 }
 
 // ==========================================================
-// 2. 明るい声の音声読み上げ ＆ マイク排他制御（スマホ衝突完全回避）
+// 2. 明るい声の音声読み上げ ＆ マイク排他制御（スマホ安定方式）
 // ==========================================================
 let isSpeaking = false;
 let speechWatchdogTimer = null;
@@ -457,14 +458,9 @@ function startRecognitionSafely() {
     clearTimeout(micRestartTimer);
     try {
         recognition.start();
-    } catch (e) {
-        // 既に起動中の場合は無視
-    }
+    } catch (e) {}
 }
 
-/**
- * 読み上げ途中にユーザーが「タップで即話す」を押したとき、即座に読み上げを中断してマイク開始
- */
 function interruptSpeechAndListenNow() {
     clearTimeout(speechWatchdogTimer);
     clearTimeout(micRestartTimer);
@@ -482,9 +478,6 @@ function interruptSpeechAndListenNow() {
     }
 }
 
-/**
- * 明るくテンポ良い即時読み上げ（読み上げ中はマイクを停止し、終了直後に自動再開する排他制御）
- */
 function speakText(text, force = false) {
     const subEl = document.getElementById('tts-subtitle');
     if (subEl) subEl.textContent = text;
@@ -505,7 +498,6 @@ function speakText(text, force = false) {
             window.speechSynthesis.resume();
         }
 
-        // ★スマホのオーディオ衝突を防ぐため、読み上げ中はマイクを一時停止する
         isSpeaking = true;
         if (recognition) {
             try { recognition.abort(); } catch (e) {}
@@ -549,13 +541,12 @@ function speakText(text, force = false) {
 function speakCurrentRecord(force = false, prefix = '') {
     const rec = getCurrentRecord();
     if (!rec) return;
-    // テンポ良くマイク待機へ移れるよう、極短・明確な案内文にする
     const msg = `${prefix}${rec.name}、単位${rec.unit}、前回${rec.prevQty}。`;
     speakText(msg, force);
 }
 
 // ==========================================================
-// 3. 連続音声認識エンジン（スマホ完全排他制御＆ステータス表示）
+// 3. 連続音声認識エンジン
 // ==========================================================
 let recognition = null;
 let lastProcessedTranscript = '';
@@ -654,7 +645,6 @@ function toggleVoiceRecognition() {
     updateVoiceUI(true);
     showToast('🎤 ハンズフリー開始（読み上げ終了後に録音開始します）');
 
-    // まずユーザー操作直後にマイク権限を取得させ、その後案内を読み上げる
     startRecognitionSafely();
     setTimeout(() => {
         if (appState.isListening) {
@@ -785,23 +775,27 @@ function extractJapaneseNumber(str) {
 }
 
 // ==========================================================
-// 4. 高精度JAN専用 全方向カメラスキャナー（誤読防止3重フィルター）
+// 4. ノンストップ連続JANスキャナー（v7：連続AF + 4パターン交互解析 + 1秒多数決）
 // ==========================================================
 let mediaStream = null;
 let offscreenVideo = null;
 let isCameraRunning = false;
-let isScanPaused = false;
 let digitalZoom = 1.6;
 let previewLoopId = null;
 let decodeTimerId = null;
 let isDecodingFrame = false;
-let scanFrameParity = 0;
+let decodingStartedAt = 0;
+let scanFramePhase = 0;
 let scanAttemptCount = 0;
-let lastCandidateCode = '';
-let candidateHitCount = 0;
-let nativeBarcodeDetector = null;
 
-// ネイティブBarcodeDetectorもJAN（EAN-13 / EAN-8）のみに絞って誤読を防止
+// 直近1.2秒間の候補バッファ（多数決判定用）
+let recentScanHits = [];
+// 同一JANの連続二重読み防止用クールダウン（2.5秒）
+let lastAcceptedCode = '';
+let lastAcceptedTime = 0;
+let successBannerTimer = null;
+
+let nativeBarcodeDetector = null;
 if ('BarcodeDetector' in window) {
     try {
         nativeBarcodeDetector = new BarcodeDetector({
@@ -810,6 +804,11 @@ if ('BarcodeDetector' in window) {
     } catch (e) {
         nativeBarcodeDetector = null;
     }
+}
+
+function isModalCurrentlyOpen() {
+    const el = document.getElementById('modal-overlay');
+    return el && !el.classList.contains('hidden');
 }
 
 function calcCoverCrop(vw, vh, destW, destH, zoom) {
@@ -833,9 +832,6 @@ function calcCoverCrop(vw, vh, destW, destH, zoom) {
     };
 }
 
-/**
- * Quagga2の読み取り信頼度（平均エラー率）を算出。0.14未満の高品質読取のみ採用する
- */
 function getQuaggaAverageError(result) {
     try {
         const codes = result?.codeResult?.decodedCodes;
@@ -849,9 +845,6 @@ function getQuaggaAverageError(result) {
     }
 }
 
-/**
- * JANコード（13桁/8桁）のチェックデジット検証
- */
 function isValidJanCheckDigit(code) {
     if (!/^\d{13}$|^\d{8}$/.test(code)) return false;
     const digits = code.split('').map(Number);
@@ -864,6 +857,54 @@ function isValidJanCheckDigit(code) {
     }
     const calc = (10 - (sum % 10)) % 10;
     return calc === checkDigit;
+}
+
+/**
+ * 候補JANを1.2秒バッファへ投入し、2回以上一致したら確定（別商品なら即座に連続読取可能）
+ */
+function registerScanCandidate(code) {
+    const now = Date.now();
+    // 同じJANだけ2.5秒間クールダウン（別JANなら待たずに即反応）
+    if (code === lastAcceptedCode && now - lastAcceptedTime < 2500) {
+        return false;
+    }
+
+    // 1.2秒以内のヒットのみ残す
+    recentScanHits = recentScanHits.filter(h => now - h.time < 1200);
+    recentScanHits.push({ code, time: now });
+
+    const matchCount = recentScanHits.filter(h => h.code === code).length;
+    if (matchCount >= 2) {
+        recentScanHits = [];
+        lastAcceptedCode = code;
+        lastAcceptedTime = now;
+        flashScanSuccessVisual(code);
+        handleBarcodeScan(code);
+        return true;
+    }
+    return false;
+}
+
+/**
+ * カメラを止めずに読取成功を緑フラッシュ＋バナーで通知
+ */
+function flashScanSuccessVisual(code) {
+    const guide = document.getElementById('scan-guide-box');
+    const banner = document.getElementById('scan-success-banner');
+    if (guide) {
+        guide.classList.remove('border-emerald-400/90');
+        guide.classList.add('border-amber-400', 'bg-emerald-400/20');
+        setTimeout(() => {
+            guide.classList.remove('border-amber-400', 'bg-emerald-400/20');
+            guide.classList.add('border-emerald-400/90');
+        }, 350);
+    }
+    if (banner) {
+        banner.textContent = `✅ 読取: ${code}（次をかざせます）`;
+        banner.classList.remove('hidden');
+        clearTimeout(successBannerTimer);
+        successBannerTimer = setTimeout(() => banner.classList.add('hidden'), 1600);
+    }
 }
 
 async function toggleCameraScanner() {
@@ -894,18 +935,34 @@ async function startCameraScanner() {
             audio: false
         });
 
+        // 対応スマホで連続オートフォーカス（continuous focus）を有効化してピンボケを防止
+        try {
+            const videoTrack = mediaStream.getVideoTracks()[0];
+            if (videoTrack && typeof videoTrack.getCapabilities === 'function') {
+                const caps = videoTrack.getCapabilities();
+                if (caps.focusMode && caps.focusMode.includes('continuous')) {
+                    await videoTrack.applyConstraints({
+                        advanced: [{ focusMode: 'continuous' }]
+                    });
+                }
+            }
+        } catch (e) {}
+
         offscreenVideo.srcObject = mediaStream;
         await offscreenVideo.play();
 
         isCameraRunning = true;
+        isDecodingFrame = false;
         scanAttemptCount = 0;
+        recentScanHits = [];
+        lastAcceptedCode = '';
+        lastAcceptedTime = 0;
+
         document.getElementById('camera-wrapper').classList.remove('hidden');
         const btn = document.getElementById('btn-cam-toggle');
         btn.classList.remove('bg-emerald-600');
         btn.classList.add('bg-slate-700');
         document.getElementById('cam-btn-label').textContent = '停止';
-
-        resumeCameraScan();
 
         const previewCanvas = document.getElementById('preview-canvas');
         const previewCtx = previewCanvas.getContext('2d', { alpha: false });
@@ -936,35 +993,45 @@ async function startCameraScanner() {
         const decodeCtx = decodeCanvas.getContext('2d', { willReadFrequently: true });
 
         decodeTimerId = setInterval(async () => {
-            if (!isCameraRunning || isScanPaused || isDecodingFrame || !offscreenVideo) return;
+            if (!isCameraRunning || !offscreenVideo) return;
+
+            // モーダルが開いている間だけ解析をスキップ（閉じれば自動で即復帰）
+            if (isModalCurrentlyOpen()) {
+                const debugEl = document.getElementById('scan-debug-info');
+                if (debugEl) debugEl.textContent = `[${APP_VERSION}] 入力画面表示中...`;
+                return;
+            }
+
+            // 万が一Quaggaコールバックが返らず詰まっても1.5秒で自動リセットしてフリーズを完全防止
+            if (isDecodingFrame) {
+                if (Date.now() - decodingStartedAt > 1500) {
+                    isDecodingFrame = false;
+                } else {
+                    return;
+                }
+            }
+
             if (offscreenVideo.readyState < offscreenVideo.HAVE_ENOUGH_DATA || offscreenVideo.videoWidth === 0) return;
 
             isDecodingFrame = true;
+            decodingStartedAt = Date.now();
             scanAttemptCount++;
+
             const debugEl = document.getElementById('scan-debug-info');
             if (debugEl) {
-                debugEl.textContent = `JAN解析: ${scanAttemptCount}回 ${candidateHitCount > 0 ? `(照合中 ${candidateHitCount}/3)` : ''}`;
+                debugEl.textContent = `[${APP_VERSION}] 連続解析: ${scanAttemptCount}回`;
             }
 
-            // 1. OSネイティブBarcodeDetector（JAN専用・2回連続一致で確定）
+            // 1. ネイティブBarcodeDetector（対応端末で超高速＆高精度）
             if (nativeBarcodeDetector) {
                 try {
                     const barcodes = await nativeBarcodeDetector.detect(previewCanvas);
                     if (barcodes && barcodes.length > 0 && barcodes[0].rawValue) {
                         const nativeCode = barcodes[0].rawValue.trim();
                         if (isValidJanCheckDigit(nativeCode)) {
-                            if (nativeCode === lastCandidateCode) {
-                                candidateHitCount++;
-                            } else {
-                                lastCandidateCode = nativeCode;
-                                candidateHitCount = 1;
-                            }
-                            if (candidateHitCount >= 2) {
-                                lastCandidateCode = '';
-                                candidateHitCount = 0;
+                            const accepted = registerScanCandidate(nativeCode);
+                            if (accepted) {
                                 isDecodingFrame = false;
-                                pauseCameraScan();
-                                handleBarcodeScan(nativeCode);
                                 return;
                             }
                         }
@@ -972,7 +1039,7 @@ async function startCameraScanner() {
                 } catch (e) {}
             }
 
-            // 2. Quagga2（JAN専用・高コントラスト・0度/90度全方向・3重誤読防止フィルター）
+            // 2. Quagga2（4パターン交互：0°標準 / 90°標準 / 0°コントラスト強調 / 90°コントラスト強調）
             const vw = offscreenVideo.videoWidth;
             const vh = offscreenVideo.videoHeight;
             const rect = previewCanvas.getBoundingClientRect();
@@ -985,9 +1052,11 @@ async function startCameraScanner() {
             const bandW = Math.floor(cropW * 0.72);
             const bandH = Math.floor(cropH * 0.76);
 
-            const rotate90 = (scanFrameParity % 2 === 1);
-            scanFrameParity++;
-            const targetSize = 520;
+            const phase = scanFramePhase % 4;
+            scanFramePhase++;
+            const rotate90 = (phase === 1 || phase === 3);
+            const useContrast = (phase === 2 || phase === 3);
+            const targetSize = 540;
 
             if (!rotate90) {
                 decodeCanvas.width = targetSize;
@@ -1004,7 +1073,9 @@ async function startCameraScanner() {
                 decodeCtx.restore();
             }
 
-            enhanceBarcodeContrast(decodeCtx, decodeCanvas.width, decodeCanvas.height);
+            if (useContrast) {
+                enhanceBarcodeContrast(decodeCtx, decodeCanvas.width, decodeCanvas.height);
+            }
             const dataUrl = decodeCanvas.toDataURL('image/jpeg', 0.86);
 
             if (typeof Quagga === 'undefined') {
@@ -1018,34 +1089,20 @@ async function startCameraScanner() {
                 locate: true,
                 inputStream: { size: Math.max(decodeCanvas.width, decodeCanvas.height) },
                 decoder: {
-                    // ★誤読の多いcode_128を除外し、日本のJANコード（EAN-13 / EAN-8）に限定
                     readers: ['ean_reader', 'ean_8_reader']
                 }
             }, (result) => {
                 isDecodingFrame = false;
-                if (!isCameraRunning || isScanPaused) return;
+                if (!isCameraRunning || isModalCurrentlyOpen()) return;
                 if (result && result.codeResult && result.codeResult.code) {
                     const code = result.codeResult.code.trim();
                     const avgErr = getQuaggaAverageError(result);
-
-                    // ★3重フィルター：①エラー率が0.14未満 ②チェックデジット正常 ③3回連続一致
                     if (avgErr < 0.14 && isValidJanCheckDigit(code)) {
-                        if (code === lastCandidateCode) {
-                            candidateHitCount++;
-                        } else {
-                            lastCandidateCode = code;
-                            candidateHitCount = 1;
-                        }
-                        if (candidateHitCount >= 3) {
-                            lastCandidateCode = '';
-                            candidateHitCount = 0;
-                            pauseCameraScan();
-                            handleBarcodeScan(code);
-                        }
+                        registerScanCandidate(code);
                     }
                 }
             });
-        }, 65);
+        }, 70);
     } catch (err) {
         showToast('カメラ起動エラー: ' + err.message);
         await stopCameraScanner();
@@ -1055,7 +1112,7 @@ async function startCameraScanner() {
 function enhanceBarcodeContrast(ctx, w, h) {
     const imgData = ctx.getImageData(0, 0, w, h);
     const data = imgData.data;
-    const contrast = 1.65;
+    const contrast = 1.6;
     const intercept = 128 * (1 - contrast);
     for (let i = 0; i < data.length; i += 4) {
         const gray = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
@@ -1074,26 +1131,10 @@ function setDigitalZoom(zoom) {
     document.getElementById(activeId).className = 'bg-emerald-600 text-white text-[10px] font-bold px-2 py-0.5 rounded';
 }
 
-function pauseCameraScan() {
-    if (!isCameraRunning) return;
-    isScanPaused = true;
-    document.getElementById('scan-overlay').classList.add('hidden');
-    document.getElementById('scan-paused-overlay').classList.remove('hidden');
-}
-
-function resumeCameraScan() {
-    isScanPaused = false;
-    lastCandidateCode = '';
-    candidateHitCount = 0;
-    if (isCameraRunning) {
-        document.getElementById('scan-overlay').classList.remove('hidden');
-        document.getElementById('scan-paused-overlay').classList.add('hidden');
-    }
-}
-
 async function stopCameraScanner() {
     isCameraRunning = false;
-    isScanPaused = false;
+    isDecodingFrame = false;
+    recentScanHits = [];
     if (previewLoopId) { cancelAnimationFrame(previewLoopId); previewLoopId = null; }
     if (decodeTimerId) { clearInterval(decodeTimerId); decodeTimerId = null; }
     if (mediaStream) {
