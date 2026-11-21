@@ -1,8 +1,8 @@
 /**
- * app-ui.js (v11)
- * ・当日カウント画面 / 事前ピックアップ専用画面（音声なし） / PC管理画面の3画面完全分離
- * ・進捗マップへの「今月金額 vs 先月金額・差額」比較表示
- * ・担当者15名 ＆ 読み上げ辞書のセル入力テーブルUI
+ * app-ui.js (v12)
+ * ・スマホ版の異常値赤帯・備考黄帯表示 ＆ 4切替絞り込み（すべて/未入力/異常/備考）
+ * ・当日カウント / 事前ピックアップ / PC管理画面の確実な切替
+ * ・進捗マップ（今月金額 vs 先月金額）/ セル形式の担当者＆辞書設定
  * ・元Excel数式保護流し込み生成 / 2次元バーコード配布 / コード全文バックアップ
  */
 
@@ -22,33 +22,44 @@ window.addEventListener('DOMContentLoaded', async () => {
 });
 
 // ==========================================================
-// 1. 3画面完全分離（当日カウント / 事前ピックアップ / PC管理）
+// 1. 確実な3画面切替（mobile / pickup / admin）
 // ==========================================================
 function switchView(viewName) {
     appState.currentView = viewName;
 
-    // ピックアップ画面またはPC管理画面へ移るときは音声を完全停止
+    // 音声は当日カウント以外では完全停止
     if (viewName !== 'mobile') {
         stopVoiceAll();
     }
+    // 管理画面へ移るときはカメラも確実に閉じる
+    if (viewName === 'admin' && isCameraRunning) {
+        stopCameraScanner();
+    }
 
-    document.getElementById('mobile-view').classList.toggle('hidden', viewName !== 'mobile');
-    document.getElementById('pickup-view').classList.toggle('hidden', viewName !== 'pickup');
-    document.getElementById('admin-view').classList.toggle('hidden', viewName !== 'admin');
-    document.getElementById('mobile-nav-bar').classList.toggle('hidden', viewName === 'admin');
+    const mv = document.getElementById('mobile-view');
+    const pv = document.getElementById('pickup-view');
+    const av = document.getElementById('admin-view');
+    const nav = document.getElementById('mobile-nav-bar');
+
+    if (mv) mv.classList.toggle('hidden', viewName !== 'mobile');
+    if (pv) pv.classList.toggle('hidden', viewName !== 'pickup');
+    if (av) av.classList.toggle('hidden', viewName !== 'admin');
+    if (nav) nav.classList.toggle('hidden', viewName === 'admin');
 
     const btnM = document.getElementById('nav-btn-mobile');
     const btnP = document.getElementById('nav-btn-pickup');
     if (btnM && btnP) {
         btnM.className = viewName === 'mobile'
-            ? 'flex-1 py-1.5 rounded-lg text-xs font-extrabold bg-blue-600 text-white shadow'
-            : 'flex-1 py-1.5 rounded-lg text-xs font-extrabold bg-slate-700 text-slate-300';
+            ? 'tap-btn flex-1 py-2 rounded-lg text-xs font-extrabold bg-blue-600 text-white shadow cursor-pointer'
+            : 'tap-btn flex-1 py-2 rounded-lg text-xs font-extrabold bg-slate-700 text-slate-200 cursor-pointer';
         btnP.className = viewName === 'pickup'
-            ? 'flex-1 py-1.5 rounded-lg text-xs font-extrabold bg-amber-500 text-slate-950 shadow'
-            : 'flex-1 py-1.5 rounded-lg text-xs font-extrabold bg-slate-700 text-slate-300';
+            ? 'tap-btn flex-1 py-2 rounded-lg text-xs font-extrabold bg-amber-500 text-slate-950 shadow cursor-pointer'
+            : 'tap-btn flex-1 py-2 rounded-lg text-xs font-extrabold bg-slate-700 text-slate-200 cursor-pointer';
     }
 
     updateCameraContainersVisibility();
+    window.scrollTo(0, 0);
+
     if (viewName === 'admin') {
         loadSettingsToCellTables();
         renderAdminDashboard();
@@ -129,6 +140,11 @@ function setActiveField(field) {
     renderMobileCard();
 }
 
+function setMobileListFilter(flt) {
+    appState.mobileListFilter = flt;
+    renderMobileList();
+}
+
 function getCurrentSheetRecords() {
     return inventoryRecords
         .filter(r => Number(r.sheetNo) === Number(appState.currentSheetNo))
@@ -180,7 +196,6 @@ function handleBarcodeScan(rawCode) {
 
     const sheetList = getCurrentSheetRecords();
 
-    // 当日カウント画面のとき：同じ用紙内に「未入力の同一JAN」があれば呼び出す
     if (appState.currentView === 'mobile') {
         const uncountedHit = sheetList.find(r => normalizeJan(r.jan) === jan && r.status !== 'done');
         if (uncountedHit) {
@@ -190,7 +205,6 @@ function handleBarcodeScan(rawCode) {
         }
     }
 
-    // 40行上限チェック
     if (sheetList.length >= 40) {
         SFX.err();
         alert(`用紙 No.${appState.currentSheetNo} は上限40行に達しています！次の用紙No.へ切り替えてください。`);
@@ -270,10 +284,10 @@ function openMemoModal() {
     const tags = ['要確認', '破損・汚損', '値札なし', '別場所あり', '賞味期限近', '未登録JAN'];
     openModal(`📝 備考欄：${rec.name}`, `
         <div class="flex flex-wrap gap-1.5">
-            ${tags.map(t => `<button onclick="appendMemoTag('${t}')" class="bg-amber-100 border border-amber-300 text-amber-900 font-bold text-xs px-2 py-1 rounded-lg">＋${t}</button>`).join('')}
+            ${tags.map(t => `<button type="button" onclick="appendMemoTag('${t}')" class="bg-amber-100 border border-amber-300 text-amber-900 font-bold text-xs px-2 py-1 rounded-lg">＋${t}</button>`).join('')}
         </div>
-        <textarea id="inp-rec-memo" rows="3" placeholder="イレギュラーや確認事項を入力" class="w-full border rounded-lg p-2 text-xs">${rec.memo || ''}</textarea>
-        <button onclick="saveCurrentMemo()" class="w-full bg-blue-600 text-white font-bold py-2.5 rounded-xl">備考を保存</button>
+        <textarea id="inp-rec-memo" rows="3" placeholder="イレギュラーや確認事項を入力" class="w-full border rounded-lg p-2">${rec.memo || ''}</textarea>
+        <button type="button" onclick="saveCurrentMemo()" class="w-full bg-blue-600 text-white font-bold py-2.5 rounded-xl">備考を保存</button>
     `);
 }
 
@@ -302,21 +316,21 @@ function openAddFoundStockModal() {
         <div class="grid grid-cols-2 gap-2">
             <div>
                 <label class="font-bold text-xs block mb-1">反映先</label>
-                <select id="add-target-field" class="w-full border rounded-lg p-2 text-xs font-bold">
+                <select id="add-target-field" class="w-full border rounded-lg p-1.5 font-bold">
                     <option value="棚上">📦 棚上へ加算</option>
                     <option value="棚下">🗄️ 棚下へ加算</option>
                 </select>
             </div>
             <div>
                 <label class="font-bold text-xs block mb-1">追加数量</label>
-                <input id="add-found-qty" type="number" inputmode="numeric" value="1" min="1" class="w-full border-2 border-amber-400 rounded-lg p-2 font-mono font-bold">
+                <input id="add-found-qty" type="number" inputmode="numeric" value="1" min="1" class="w-full border-2 border-amber-400 rounded-lg p-1.5 font-mono font-bold">
             </div>
         </div>
         <div>
             <label class="font-bold text-xs block mb-1">発見場所・メモ</label>
-            <input id="add-found-memo" type="text" placeholder="例：バックヤード奥の箱から発見" class="w-full border rounded-lg p-2 text-xs">
+            <input id="add-found-memo" type="text" placeholder="例：バックヤード奥の箱から発見" class="w-full border rounded-lg p-1.5">
         </div>
-        <button onclick="commitAddFoundStock()" class="w-full bg-amber-500 text-slate-950 font-bold py-2.5 rounded-xl">＋ 追加発見を記録</button>
+        <button type="button" onclick="commitAddFoundStock()" class="w-full bg-amber-500 text-slate-950 font-bold py-2.5 rounded-xl">＋ 追加発見を記録</button>
     `);
 }
 
@@ -363,7 +377,7 @@ function openManualAddProductModal() {
                 </div>
                 <div>
                     <label class="font-bold text-xs block">部門(中分類)</label>
-                    <select id="man-cat" class="w-full border rounded-lg p-1.5 text-xs">
+                    <select id="man-cat" class="w-full border rounded-lg p-1.5">
                         <option value="一般">一般</option>
                         <option value="酒">酒</option>
                         <option value="その他">その他</option>
@@ -374,7 +388,7 @@ function openManualAddProductModal() {
                 <label class="font-bold text-xs block">JANコード（空欄可）</label>
                 <div class="flex gap-1">
                     <input id="man-jan" type="text" inputmode="numeric" placeholder="49..." class="flex-1 border rounded-lg p-1.5 font-mono">
-                    <button onclick="autofillManualJan()" class="bg-slate-800 text-white text-xs px-2.5 rounded-lg">台帳検索</button>
+                    <button type="button" onclick="autofillManualJan()" class="bg-slate-800 text-white text-xs px-2.5 rounded-lg">台帳検索</button>
                 </div>
             </div>
             <div>
@@ -388,9 +402,9 @@ function openManualAddProductModal() {
             </div>
             <div>
                 <label class="font-bold text-xs block">備考（任意）</label>
-                <input id="man-memo" type="text" class="w-full border rounded-lg p-1.5 text-xs">
+                <input id="man-memo" type="text" class="w-full border rounded-lg p-1.5">
             </div>
-            <button onclick="saveManualProduct()" class="w-full bg-blue-600 text-white font-bold py-2.5 rounded-xl">この内容で追加</button>
+            <button type="button" onclick="saveManualProduct()" class="w-full bg-blue-600 text-white font-bold py-2.5 rounded-xl">この内容で追加</button>
         </div>
     `);
 }
@@ -442,8 +456,8 @@ function openEditSheetNameModal() {
     const no = String(appState.currentSheetNo);
     const cur = (masterData.sheetNames && masterData.sheetNames[no]) || '';
     openModal(`✏️ 用紙 No.${no} の区画名設定`, `
-        <input id="inp-sheet-name" type="text" value="${cur}" placeholder="例：入口特設、酒コーナー" class="w-full border rounded-lg p-2 text-sm">
-        <button onclick="saveSheetName()" class="w-full bg-blue-600 text-white font-bold py-2 rounded-lg">区画名を保存</button>
+        <input id="inp-sheet-name" type="text" value="${cur}" placeholder="例：入口特設、酒コーナー" class="w-full border rounded-lg p-2">
+        <button type="button" onclick="saveSheetName()" class="w-full bg-blue-600 text-white font-bold py-2.5 rounded-xl">区画名を保存</button>
     `);
 }
 
@@ -551,7 +565,7 @@ function selectRecord(id, autoSpeak = false) {
 }
 
 // ==========================================================
-// 5. 画面描画（当日カウント / ピックアップ専用 / 進捗金額比較マップ）
+// 5. 画面描画（スマホ異常値/備考表示 ＆ 4絞り込み）
 // ==========================================================
 function renderAllViews() {
     renderMobileView();
@@ -573,6 +587,9 @@ function renderMobileCard() {
     const rec = getCurrentRecord();
     const boxU = document.getElementById('box-qty-upper');
     const boxL = document.getElementById('box-qty-lower');
+    const anomBar = document.getElementById('m-cur-anomaly-bar');
+    const memoBar = document.getElementById('m-cur-memo-bar');
+
     boxU.className = appState.activeField === 'upper'
         ? 'text-left bg-blue-950 rounded-lg px-2 py-1 border-2 border-amber-400'
         : 'text-left bg-slate-800 rounded-lg px-2 py-1 border-2 border-slate-600 opacity-75';
@@ -589,6 +606,8 @@ function renderMobileCard() {
         document.getElementById('m-val-lower').textContent = '-';
         document.getElementById('m-val-total').textContent = '0';
         document.getElementById('btn-memo-badge').textContent = '📝備考';
+        anomBar.classList.add('hidden');
+        memoBar.classList.add('hidden');
         return;
     }
 
@@ -604,34 +623,80 @@ function renderMobileCard() {
     document.getElementById('m-val-lower').textContent = rec.qtyLower === null ? '-' : rec.qtyLower;
     document.getElementById('m-val-total').textContent = total;
     document.getElementById('btn-memo-badge').textContent = rec.memo ? '📝備考あり' : '📝備考';
+
+    // 異常値・備考のカード内直接表示
+    const anomalies = checkRecordAnomalies(rec);
+    if (anomalies.length > 0) {
+        anomBar.textContent = `⚠️ 異常値・差異: ${anomalies.join(' / ')}`;
+        anomBar.classList.remove('hidden');
+    } else {
+        anomBar.classList.add('hidden');
+    }
+    if (rec.memo) {
+        memoBar.textContent = `📝 備考: ${rec.memo}`;
+        memoBar.classList.remove('hidden');
+    } else {
+        memoBar.classList.add('hidden');
+    }
 }
 
 function renderMobileList() {
-    const onlyUncounted = document.getElementById('chk-only-uncounted').checked;
     const list = getCurrentSheetRecords();
-    const filtered = onlyUncounted ? list.filter(r => r.status !== 'done') : list;
+    const anomCount = list.filter(r => checkRecordAnomalies(r).length > 0).length;
+    const memoCount = list.filter(r => Boolean(r.memo)).length;
+
+    const btnAll = document.getElementById('m-flt-all');
+    const btnUnc = document.getElementById('m-flt-uncounted');
+    const btnAno = document.getElementById('m-flt-anomaly');
+    const btnMem = document.getElementById('m-flt-memo');
+
+    btnAno.textContent = `⚠️異常(${anomCount})`;
+    btnMem.textContent = `📝備考(${memoCount})`;
+
+    const flt = appState.mobileListFilter;
+    btnAll.className = flt === 'all' ? 'py-1.5 rounded-lg bg-slate-800 text-white' : 'py-1.5 rounded-lg bg-slate-100 text-slate-700';
+    btnUnc.className = flt === 'uncounted' ? 'py-1.5 rounded-lg bg-blue-600 text-white' : 'py-1.5 rounded-lg bg-slate-100 text-slate-700';
+    btnAno.className = flt === 'anomaly' ? 'py-1.5 rounded-lg bg-rose-600 text-white' : 'py-1.5 rounded-lg bg-rose-50 text-rose-700';
+    btnMem.className = flt === 'memo' ? 'py-1.5 rounded-lg bg-amber-500 text-slate-950' : 'py-1.5 rounded-lg bg-amber-50 text-amber-900';
+
+    let filtered = list;
+    if (flt === 'uncounted') filtered = list.filter(r => r.status !== 'done');
+    else if (flt === 'anomaly') filtered = list.filter(r => checkRecordAnomalies(r).length > 0);
+    else if (flt === 'memo') filtered = list.filter(r => Boolean(r.memo));
+
     const container = document.getElementById('m-inventory-list');
     if (filtered.length === 0) {
         container.innerHTML = `<div class="p-4 text-center text-slate-400">該当する商品がありません</div>`;
         return;
     }
+
     container.innerHTML = filtered.map((r) => {
         const rowNum = list.findIndex(x => x.id === r.id) + 1;
         const isSel = r.id === appState.selectedRecordId;
-        const badge = r.status === 'done'
+        const anomalies = checkRecordAnomalies(r);
+        const hasAnom = anomalies.length > 0;
+
+        const rowBg = isSel
+            ? 'bg-blue-50 border-l-4 border-blue-600'
+            : hasAnom ? 'bg-rose-50 border-l-4 border-rose-500' : 'hover:bg-slate-50';
+
+        const statusBadge = r.status === 'done'
             ? '<span class="bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded font-bold">済</span>'
             : r.status === 'partial'
                 ? '<span class="bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded font-bold">片方</span>'
                 : '<span class="bg-rose-100 text-rose-700 px-1.5 py-0.5 rounded font-bold">未</span>';
+
         return `
-        <div onclick="selectRecord('${r.id}', true)" class="p-2 flex items-center justify-between gap-2 cursor-pointer ${isSel ? 'bg-blue-50 border-l-4 border-blue-600' : 'hover:bg-slate-50'}">
+        <div onclick="selectRecord('${r.id}', true)" class="p-2 flex items-center justify-between gap-2 cursor-pointer ${rowBg}">
             <div class="min-w-0 flex-1">
-                <div class="font-bold text-slate-800 truncate">${rowNum}. ${r.name} ${r.memo ? '📝' : ''}</div>
+                <div class="font-bold text-slate-800 truncate">${rowNum}. ${r.name}</div>
                 <div class="text-[10px] text-slate-500 font-mono">JAN:${r.jan || '-'} | ¥${r.price}</div>
+                ${hasAnom ? `<div class="text-[10px] text-rose-700 font-bold mt-0.5">⚠️ ${anomalies.join(' / ')}</div>` : ''}
+                ${r.memo ? `<div class="text-[10px] text-amber-900 bg-amber-100 inline-block px-1.5 py-0.5 rounded mt-0.5">📝 ${r.memo}</div>` : ''}
             </div>
             <div class="text-right shrink-0">
                 <div class="font-mono font-bold text-slate-900">上:${r.qtyUpper ?? '-'} / 下:${r.qtyLower ?? '-'}</div>
-                <div class="mt-0.5">${badge}</div>
+                <div class="mt-0.5">${statusBadge}</div>
             </div>
         </div>`;
     }).join('');
@@ -653,14 +718,11 @@ function renderPickupView() {
                 <div class="font-bold text-slate-800 truncate">${idx + 1}. ${r.name}</div>
                 <div class="text-[10px] text-slate-500 font-mono">JAN:${r.jan || '-'} | 上代:¥${r.price}</div>
             </div>
-            <button onclick="deleteRecordById('${r.id}')" class="bg-rose-100 text-rose-700 font-bold text-[11px] px-2 py-1 rounded-lg shrink-0">削除</button>
+            <button type="button" onclick="deleteRecordById('${r.id}')" class="bg-rose-100 text-rose-700 font-bold text-[11px] px-2.5 py-1.5 rounded-lg shrink-0">削除</button>
         </div>
     `).join('');
 }
 
-/**
- * 進捗マップ（今月金額 vs 先月金額・差額を比較表示）
- */
 function buildProgressMapHtml(clickHandlerName) {
     const bySheet = new Map();
     inventoryRecords.forEach(r => {
@@ -696,7 +758,7 @@ function buildProgressMapHtml(clickHandlerName) {
         const areaName = (masterData.sheetNames && masterData.sheetNames[String(i)]) || '';
 
         html += `
-        <button onclick="${clickHandlerName}(${i})" class="p-2 rounded-xl border text-left text-[10px] leading-snug ${bg} ${memoBorder}">
+        <button type="button" onclick="${clickHandlerName}(${i})" class="p-2 rounded-xl border text-left text-[10px] leading-snug ${bg} ${memoBorder}">
             <div class="flex justify-between items-center font-extrabold">
                 <span>No.${i}</span>
                 <span class="text-[9px]">${total > 0 ? `${done}/${total}` : '-'}</span>
@@ -726,7 +788,7 @@ function jumpToSheetFromModal(no) {
 }
 
 // ==========================================================
-// 6. PC管理画面・セル形式設定（担当者・読み上げ辞書）
+// 6. PC管理画面・セル形式設定
 // ==========================================================
 function requestAdminView() {
     if (appState.isAdminUnlocked) return switchView('admin');
@@ -827,7 +889,7 @@ function renderAdminExportTable() {
                 ${r.memo ? `<div class="text-slate-700">📝 ${r.memo}</div>` : ''}
             </td>
             <td class="p-2 text-[11px]">${r.worker || ''}</td>
-            <td class="p-2 text-center"><button onclick="deleteRecordById('${r.id}')" class="text-rose-600 font-bold">削除</button></td>
+            <td class="p-2 text-center"><button type="button" onclick="deleteRecordById('${r.id}')" class="text-rose-600 font-bold">削除</button></td>
         </tr>`;
     }).join('');
 }
@@ -851,7 +913,6 @@ function renderAdminAddLogsTable() {
     `).join('');
 }
 
-// セル形式UI：担当者15名 ＆ 読み上げ辞書
 function loadSettingsToCellTables() {
     const cfg = masterData.alertSettings || defaultMaster.alertSettings;
     document.getElementById('set-alert-qty').value = cfg.maxQty;
@@ -872,7 +933,7 @@ function renderWorkersCellTable() {
         html += `
         <tr>
             <td class="p-1 text-center font-mono text-slate-500 bg-slate-50 border-r">${i + 1}</td>
-            <td class="p-0"><input type="text" class="worker-cell-input w-full px-2 py-1.5 outline-none focus:bg-blue-50" value="${val}" placeholder="担当者名を入力"></td>
+            <td class="p-0"><input type="text" class="worker-cell-input w-full px-2 py-1 outline-none focus:bg-blue-50" value="${val}" placeholder="担当者名を入力"></td>
         </tr>`;
     }
     tbody.innerHTML = html;
@@ -898,9 +959,9 @@ function renderDictCellTable() {
     if (readingDict.length === 0) readingDict.push(['', '']);
     tbody.innerHTML = readingDict.map((pair, idx) => `
         <tr>
-            <td class="p-0 border-r"><input type="text" class="dict-k-input w-full px-2 py-1.5 outline-none focus:bg-indigo-50" value="${pair[0] || ''}" placeholder="例：紅花"></td>
-            <td class="p-0 border-r"><input type="text" class="dict-v-input w-full px-2 py-1.5 outline-none focus:bg-indigo-50" value="${pair[1] || ''}" placeholder="例：べにばな"></td>
-            <td class="p-1 text-center"><button onclick="removeDictRow(${idx})" class="text-rose-600 font-bold px-1">×</button></td>
+            <td class="p-0 border-r"><input type="text" class="dict-k-input w-full px-2 py-1 outline-none focus:bg-indigo-50" value="${pair[0] || ''}" placeholder="例：紅花"></td>
+            <td class="p-0 border-r"><input type="text" class="dict-v-input w-full px-2 py-1 outline-none focus:bg-indigo-50" value="${pair[1] || ''}" placeholder="例：べにばな"></td>
+            <td class="p-1 text-center"><button type="button" onclick="removeDictRow(${idx})" class="text-rose-600 font-bold px-1">×</button></td>
         </tr>
     `).join('');
 }
@@ -945,7 +1006,7 @@ function saveAlertSettings() {
     };
     saveToLocalStorage();
     postToGasApi({ action: 'saveMaster', masterData });
-    renderAdminDashboard();
+    renderAllViews();
     showToast('✅ 異常値・差異アラート設定を保存しました');
 }
 
@@ -1166,13 +1227,13 @@ function openGasUrlModal() {
     openModal('⚙️ 接続設定 ＆ スタッフ配布用2次元バーコード', `
         <div class="space-y-3">
             <p class="text-xs text-slate-600">GAS URLは端末に永久保存されるため、今後のアプリ更新で消えません。</p>
-            <input id="inp-gas-url" type="url" value="${curUrl}" placeholder="https://script.google.com/macros/s/.../exec" class="w-full border-2 border-blue-400 rounded-lg p-2 font-mono text-xs">
-            <button onclick="saveGasUrl()" class="w-full bg-blue-600 text-white font-bold py-2 rounded-xl">💾 URLを保存して今すぐ同期</button>
+            <input id="inp-gas-url" type="url" value="${curUrl}" placeholder="https://script.google.com/macros/s/.../exec" class="w-full border-2 border-blue-400 rounded-lg p-2 font-mono">
+            <button type="button" onclick="saveGasUrl()" class="w-full bg-blue-600 text-white font-bold py-2.5 rounded-xl">💾 URLを保存して今すぐ同期</button>
             ${shareUrl ? `
             <div class="pt-3 border-t text-center space-y-2">
                 <div class="font-bold text-xs text-slate-800">📱 スタッフ配布用 2次元バーコード（スマホで読取）</div>
                 <div id="qr-code-container" class="flex justify-center p-2 bg-white border rounded-xl"></div>
-                <button onclick="copyShareUrlText('${shareUrl}')" class="w-full bg-slate-800 text-amber-300 font-bold py-2 rounded-xl text-xs">📋 配布用リンクをコピー</button>
+                <button type="button" onclick="copyShareUrlText('${shareUrl}')" class="w-full bg-slate-800 text-amber-300 font-bold py-2 rounded-xl text-xs">📋 配布用リンクをコピー</button>
             </div>` : '<p class="text-xs text-amber-700">※URLを保存すると、ここにスタッフ配布用の2次元バーコードが表示されます。</p>'}
         </div>
     `);
@@ -1201,8 +1262,8 @@ function copyShareUrlText(url) {
 async function buildFullSourceBundleText() {
     const htmlContent = document.documentElement.outerHTML;
     let coreJs = '', uiJs = '';
-    try { const r1 = await fetch('app-core.js?v=11'); if (r1.ok) coreJs = await r1.text(); } catch (e) {}
-    try { const r2 = await fetch('app-ui.js?v=11'); if (r2.ok) uiJs = await r2.text(); } catch (e) {}
+    try { const r1 = await fetch('app-core.js?v=12'); if (r1.ok) coreJs = await r1.text(); } catch (e) {}
+    try { const r2 = await fetch('app-ui.js?v=12'); if (r2.ok) uiJs = await r2.text(); } catch (e) {}
     if (coreJs && uiJs) {
         return `<!-- ===== index.html ===== -->\n<!DOCTYPE html>\n${htmlContent}\n\n/* ===== app-core.js ===== */\n${coreJs}\n\n/* ===== app-ui.js ===== */\n${uiJs}`;
     }
@@ -1220,15 +1281,15 @@ function openBackupModal() {
 
     openModal('💾 バックアップ ＆ コード全文出力', `
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            <button onclick="copyBackupDataJson()" class="bg-blue-600 text-white font-bold py-2 px-3 rounded-xl text-xs">📋 ① 全データをコピー</button>
-            <button onclick="downloadBackupDataJson()" class="bg-emerald-600 text-white font-bold py-2 px-3 rounded-xl text-xs">⬇️ ② 全データ(JSON)保存</button>
-            <button onclick="copyAppSourceCode()" class="bg-indigo-600 text-white font-bold py-2 px-3 rounded-xl text-xs">📄 ③ コード全文をコピー</button>
-            <button onclick="downloadAppSourceCode()" class="bg-slate-800 text-white font-bold py-2 px-3 rounded-xl text-xs">💾 ④ コード自体をダウンロード</button>
+            <button type="button" onclick="copyBackupDataJson()" class="bg-blue-600 text-white font-bold py-2 px-3 rounded-xl text-xs">📋 ① 全データをコピー</button>
+            <button type="button" onclick="downloadBackupDataJson()" class="bg-emerald-600 text-white font-bold py-2 px-3 rounded-xl text-xs">⬇️ ② 全データ(JSON)保存</button>
+            <button type="button" onclick="copyAppSourceCode()" class="bg-indigo-600 text-white font-bold py-2 px-3 rounded-xl text-xs">📄 ③ コード全文をコピー</button>
+            <button type="button" onclick="downloadAppSourceCode()" class="bg-slate-800 text-white font-bold py-2 px-3 rounded-xl text-xs">💾 ④ コード自体をダウンロード</button>
         </div>
-        <textarea id="backup-textarea" rows="7" class="w-full border rounded-lg p-2 font-mono text-[11px] bg-slate-50">${fullJson}</textarea>
+        <textarea id="backup-textarea" rows="7" class="w-full border rounded-lg p-2 font-mono bg-slate-50">${fullJson}</textarea>
         <div class="flex justify-between items-center pt-2 border-t">
-            <button onclick="restoreFromBackupJson()" class="bg-amber-500 text-slate-950 font-bold px-3 py-2 rounded-xl text-xs">🔄 上記JSONから復元</button>
-            <button onclick="closeModal()" class="bg-slate-200 px-3 py-2 rounded-xl font-bold text-xs">閉じる</button>
+            <button type="button" onclick="restoreFromBackupJson()" class="bg-amber-500 text-slate-950 font-bold px-3 py-2 rounded-xl text-xs">🔄 上記JSONから復元</button>
+            <button type="button" onclick="closeModal()" class="bg-slate-200 px-3 py-2 rounded-xl font-bold text-xs">閉じる</button>
         </div>
     `);
 }
@@ -1256,7 +1317,7 @@ async function downloadAppSourceCode() {
     document.getElementById('backup-textarea').value = code;
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([code], { type: 'text/html;charset=utf-8;' }));
-    a.download = `okegawa_inventory_app_code_v11_${new Date().toISOString().slice(0, 10)}.html`;
+    a.download = `okegawa_inventory_app_code_v12_${new Date().toISOString().slice(0, 10)}.html`;
     a.click();
     showToast('💾 コードファイルをダウンロードしました');
 }
