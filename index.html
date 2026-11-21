@@ -226,4 +226,345 @@
 
             <!-- 数字テンキー（高さを抑えて押しやすい設計） -->
             <div class="grid grid-cols-3 gap-1 text-lg font-bold">
-                <button onclick="pressNumKey('7')"
+                <button onclick="pressNumKey('7')" class="tap-btn bg-slate-50 active:bg-slate-200 border border-slate-300 py-2 rounded-lg">7</button>
+                <button onclick="pressNumKey('8')" class="tap-btn bg-slate-50 active:bg-slate-200 border border-slate-300 py-2 rounded-lg">8</button>
+                <button onclick="pressNumKey('9')" class="tap-btn bg-slate-50 active:bg-slate-200 border border-slate-300 py-2 rounded-lg">9</button>
+
+                <button onclick="pressNumKey('4')" class="tap-btn bg-slate-50 active:bg-slate-200 border border-slate-300 py-2 rounded-lg">4</button>
+                <button onclick="pressNumKey('5')" class="tap-btn bg-slate-50 active:bg-slate-200 border border-slate-300 py-2 rounded-lg">5</button>
+                <button onclick="pressNumKey('6')" class="tap-btn bg-slate-50 active:bg-slate-200 border border-slate-300 py-2 rounded-lg">6</button>
+
+                <button onclick="pressNumKey('1')" class="tap-btn bg-slate-50 active:bg-slate-200 border border-slate-300 py-2 rounded-lg">1</button>
+                <button onclick="pressNumKey('2')" class="tap-btn bg-slate-50 active:bg-slate-200 border border-slate-300 py-2 rounded-lg">2</button>
+                <button onclick="pressNumKey('3')" class="tap-btn bg-slate-50 active:bg-slate-200 border border-slate-300 py-2 rounded-lg">3</button>
+
+                <button onclick="clearQtyInput()" class="tap-btn bg-rose-50 text-rose-700 border border-rose-300 py-2 rounded-lg text-xs font-bold">クリア(0)</button>
+                <button onclick="pressNumKey('0')" class="tap-btn bg-slate-50 active:bg-slate-200 border border-slate-300 py-2 rounded-lg">0</button>
+                <button onclick="backspaceQty()" class="tap-btn bg-amber-50 text-amber-800 border border-amber-300 py-2 rounded-lg text-xs font-bold">⌫ 1字消</button>
+            </div>
+
+            <!-- 前へ / 確定して次へ -->
+            <div class="grid grid-cols-12 gap-1.5 pt-0.5">
+                <button onclick="movePrevRecord()" class="col-span-4 tap-btn bg-slate-600 text-white py-2.5 rounded-xl font-bold text-xs">
+                    ◀ 前へ
+                </button>
+                <button onclick="confirmAndNextRecord()" class="col-span-8 tap-btn bg-blue-600 active:bg-blue-700 text-white py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-1 shadow">
+                    <span>✅ 確定して次へ</span>
+                    <span>▶</span>
+                </button>
+            </div>
+        </div>
+
+        <!-- ④ 下部（スクロール領域）：商品詳細・追加発見ログ・複数保管場所・対象一覧 -->
+        <div class="bg-white rounded-xl p-2.5 shadow-sm border border-slate-200 space-y-2 text-xs">
+            <div class="flex items-center justify-between border-b border-slate-200 pb-1.5">
+                <span class="font-bold text-slate-700">📋 商品詳細・複数場所・追加履歴</span>
+                <button onclick="openNewMasterModal()" class="text-blue-600 font-bold text-[11px]">＋新規商品/場所</button>
+            </div>
+
+            <!-- 基本属性（JAN・メーカー・単価・単位変更） -->
+            <div class="grid grid-cols-2 gap-1.5 bg-slate-50 p-2 rounded-lg border border-slate-200 text-[11px]">
+                <div>JAN: <b id="m-detail-jan" class="font-mono">490123400101</b></div>
+                <div>メーカー: <b id="m-detail-maker">サンプル食品</b></div>
+                <div>標準単価: <b id="m-detail-price">¥148</b></div>
+                <div class="flex items-center gap-1">
+                    <span>単位変更:</span>
+                    <select id="m-detail-unit-select" onchange="changeCurrentProductUnit(this.value)" class="bg-white border border-slate-300 rounded px-1 py-0.5 font-bold"></select>
+                </div>
+            </div>
+
+            <!-- この商品の全保管場所（場所別内訳） -->
+            <div>
+                <div class="font-bold text-slate-600 text-[11px] mb-1">📍 この商品の保管場所一覧（タップで切替）</div>
+                <div id="m-same-product-locations" class="space-y-1"></div>
+            </div>
+
+            <!-- 後から見つかった在庫の追加履歴 -->
+            <div>
+                <div class="flex justify-between items-center mb-1">
+                    <span class="font-bold text-slate-600 text-[11px]">➕ 後から見つかった追加分の履歴</span>
+                    <button onclick="openAddFoundStockModal()" class="bg-amber-100 text-amber-900 border border-amber-300 px-2 py-0.5 rounded text-[10px] font-bold">
+                        ＋追加在庫を登録
+                    </button>
+                </div>
+                <div id="m-add-logs-list" class="space-y-1 text-[11px]"></div>
+            </div>
+
+            <!-- 現在の絞り込み対象リスト -->
+            <div class="pt-1 border-t border-slate-200">
+                <div class="flex justify-between items-center mb-1">
+                    <span class="font-bold text-slate-700">■ 棚卸リスト（タップで選択＆読み上げ）</span>
+                    <span id="m-progress-text" class="text-blue-700 font-bold text-[11px]">完了 0/0</span>
+                </div>
+                <div id="m-inventory-list" class="max-h-56 overflow-y-auto divide-y divide-slate-100 border border-slate-200 rounded-lg"></div>
+            </div>
+        </div>
+    </main>
+
+    <!-- ========================================================== -->
+    <!-- 2. PC管理者専用ダッシュボード（PINロック解除後のみ表示） -->
+    <!-- ========================================================== -->
+    <main id="admin-view" class="hidden flex-1 max-w-7xl w-full mx-auto p-3 sm:p-5 flex flex-col gap-4">
+
+        <!-- 管理者上部バー -->
+        <div class="bg-slate-900 text-white p-4 rounded-2xl shadow flex flex-wrap items-center justify-between gap-3">
+            <div>
+                <div class="flex items-center gap-2">
+                    <span class="bg-amber-400 text-slate-950 font-extrabold text-xs px-2.5 py-0.5 rounded">管理者専用 PCモード</span>
+                    <h2 class="text-lg sm:text-xl font-bold">全体進捗・二軸集計（場所×商品）・マスタ管理</h2>
+                </div>
+                <p class="text-xs text-slate-400 mt-0.5">最大15名の作業データ集約・後から追加分の履歴追跡・GASスプレッドシートAPI連携</p>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+                <button onclick="openGasConfigModal()" class="bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs px-3.5 py-2 rounded-xl">
+                    ⚙️ GAS URL接続設定・配布リンク
+                </button>
+                <button onclick="fetchAllFromGasApi(true)" class="bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs px-3.5 py-2 rounded-xl">
+                    🔄 シート最新取得
+                </button>
+                <button onclick="openSpreadsheetModal()" class="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs px-3.5 py-2 rounded-xl">
+                    📊 CSV出力 / コピー
+                </button>
+                <button onclick="openBackupModal()" class="bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs px-3.5 py-2 rounded-xl">
+                    💾 バックアップ / コード保存
+                </button>
+                <button onclick="switchToMobileView()" class="bg-slate-700 hover:bg-slate-600 text-white font-bold text-xs px-3.5 py-2 rounded-xl">
+                    📱 スマホ入力画面へ戻る
+                </button>
+            </div>
+        </div>
+
+        <!-- KPI集計サマリーカード（4枚） -->
+        <section class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
+                <span class="text-xs text-slate-500 font-bold">全体ロケーション進捗</span>
+                <div class="text-2xl font-extrabold text-slate-900 mt-1" id="pc-kpi-progress">0 / 0 箇所 (0%)</div>
+                <div class="w-full bg-slate-200 h-2 rounded-full mt-2 overflow-hidden">
+                    <div id="pc-kpi-progress-bar" class="bg-blue-600 h-full" style="width: 0%"></div>
+                </div>
+            </div>
+            <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
+                <span class="text-xs text-slate-500 font-bold">今回棚卸 合計金額（単価×実棚）</span>
+                <div class="text-2xl font-extrabold text-emerald-700 mt-1 font-mono" id="pc-kpi-total-amount">¥0</div>
+                <span class="text-[11px] text-slate-400" id="pc-kpi-prev-amount">前回総額: ¥0</span>
+            </div>
+            <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
+                <span class="text-xs text-slate-500 font-bold">後から発見・追加された在庫</span>
+                <div class="text-2xl font-extrabold text-amber-600 mt-1" id="pc-kpi-added-count">0 件（計 0）</div>
+                <span class="text-[11px] text-slate-400">追加場所・担当者すべて記録済</span>
+            </div>
+            <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
+                <span class="text-xs text-slate-500 font-bold">稼働スタッフ（最大15名）</span>
+                <div class="text-2xl font-extrabold text-indigo-700 mt-1" id="pc-kpi-workers">15 名登録</div>
+                <span class="text-[11px] text-slate-400" id="pc-kpi-diff-alert">差異あり商品: 0品目</span>
+            </div>
+        </section>
+
+        <!-- PC管理タブ切り替え -->
+        <div class="flex flex-wrap gap-2 border-b border-slate-300 pb-2">
+            <button onclick="switchAdminTab('tab-locations')" id="btn-tab-locations" class="bg-blue-600 text-white font-bold text-xs px-4 py-2 rounded-xl">
+                📍 ① 場所別（棚・段ごと）一覧
+            </button>
+            <button onclick="switchAdminTab('tab-products')" id="btn-tab-products" class="bg-white text-slate-700 border border-slate-300 font-bold text-xs px-4 py-2 rounded-xl">
+                📦 ② 商品別（複数箇所合算）集計
+            </button>
+            <button onclick="switchAdminTab('tab-addlogs')" id="btn-tab-addlogs" class="bg-white text-slate-700 border border-slate-300 font-bold text-xs px-4 py-2 rounded-xl">
+                ➕ ③ 後から追加した在庫履歴
+            </button>
+            <button onclick="switchAdminTab('tab-masters')" id="btn-tab-masters" class="bg-white text-slate-700 border border-slate-300 font-bold text-xs px-4 py-2 rounded-xl">
+                🗄️ ④ 棚・商品・単位・15名マスタ管理
+            </button>
+        </div>
+
+        <!-- タブ①：場所別（ロケーション別）管理テーブル -->
+        <section id="tab-locations" class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-3">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+                <h3 class="font-bold text-sm text-slate-800">📍 場所別（エリア・棚・段）在庫明細テーブル</h3>
+                <div class="flex flex-wrap gap-2 text-xs">
+                    <select id="pc-filter-area" onchange="renderAdminTables()" class="border border-slate-300 rounded-lg px-2 py-1"></select>
+                    <select id="pc-filter-status" onchange="renderAdminTables()" class="border border-slate-300 rounded-lg px-2 py-1">
+                        <option value="all">全状態</option>
+                        <option value="uncounted">未入力のみ</option>
+                        <option value="counted">確定済のみ</option>
+                        <option value="diff">前回と差異あり</option>
+                        <option value="added">後から追加あり</option>
+                    </select>
+                    <button onclick="openNewMasterModal()" class="bg-blue-600 text-white font-bold px-3 py-1 rounded-lg">
+                        ＋ 商品・保管場所を追加
+                    </button>
+                </div>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="w-full text-xs text-left border-collapse">
+                    <thead>
+                        <tr class="bg-slate-100 text-slate-600 border-b border-slate-300">
+                            <th class="p-2">エリア / 棚 / 段</th>
+                            <th class="p-2">JAN / 商品名</th>
+                            <th class="p-2">メーカー</th>
+                            <th class="p-2 text-center">単位</th>
+                            <th class="p-2 text-right">前回数</th>
+                            <th class="p-2 text-right">初回実棚</th>
+                            <th class="p-2 text-right">後から追加</th>
+                            <th class="p-2 text-right font-bold">今回合計</th>
+                            <th class="p-2 text-right">差異</th>
+                            <th class="p-2 text-right">金額</th>
+                            <th class="p-2">担当者 / 状態</th>
+                            <th class="p-2 text-center">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="pc-location-tbody" class="divide-y divide-slate-200"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- タブ②：商品別（複数箇所の名寄せ合算）テーブル -->
+        <section id="tab-products" class="hidden bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-3">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                    <h3 class="font-bold text-sm text-slate-800">📦 商品別（全保管場所の合算）集計テーブル</h3>
+                    <p class="text-xs text-slate-500">複数箇所にある同一JAN商品の在庫を自動合算し、どこにいくつあるかの内訳を表示します。</p>
+                </div>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="w-full text-xs text-left border-collapse">
+                    <thead>
+                        <tr class="bg-slate-100 text-slate-600 border-b border-slate-300">
+                            <th class="p-2">JANコード</th>
+                            <th class="p-2">商品名 / メーカー</th>
+                            <th class="p-2 text-center">単位</th>
+                            <th class="p-2 text-right">単価</th>
+                            <th class="p-2">場所別の在庫内訳（どこに・いくつ）</th>
+                            <th class="p-2 text-right">前回総数</th>
+                            <th class="p-2 text-right font-bold">今回総数</th>
+                            <th class="p-2 text-right">総差異</th>
+                            <th class="p-2 text-right">合計金額</th>
+                        </tr>
+                    </thead>
+                    <tbody id="pc-product-tbody" class="divide-y divide-slate-200"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- タブ③：後から見つかった在庫の追加履歴テーブル -->
+        <section id="tab-addlogs" class="hidden bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-3">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                    <h3 class="font-bold text-sm text-slate-800">➕ 後から見つかった在庫の追加登録履歴</h3>
+                    <p class="text-xs text-slate-500">いつ・誰が・どの場所（エリア/棚/段）で・どの商品を・いくつ追加したかの完全な監査ログです。</p>
+                </div>
+                <button onclick="openAddFoundStockModal()" class="bg-amber-500 text-slate-950 font-bold text-xs px-3 py-1.5 rounded-lg">
+                    ＋ PCから追加発見分を登録
+                </button>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="w-full text-xs text-left border-collapse">
+                    <thead>
+                        <tr class="bg-slate-100 text-slate-600 border-b border-slate-300">
+                            <th class="p-2">追加日時</th>
+                            <th class="p-2">担当者</th>
+                            <th class="p-2">発見場所（エリア / 棚 / 段）</th>
+                            <th class="p-2">JAN / 商品名</th>
+                            <th class="p-2 text-right">追加数量</th>
+                            <th class="p-2">メモ・発見状況</th>
+                        </tr>
+                    </thead>
+                    <tbody id="pc-addlogs-tbody" class="divide-y divide-slate-200"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- タブ④：棚・単位・メーカー・担当者（15名）・管理者PINマスタ設定 -->
+        <section id="tab-masters" class="hidden grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            <!-- エリア・棚・段マスタ -->
+            <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-2">
+                <h4 class="font-bold text-sm text-slate-800">📍 エリア・棚番号・段マスタ</h4>
+                <div class="space-y-2 text-xs">
+                    <div>
+                        <label class="font-bold text-slate-600">エリア一覧</label>
+                        <div class="flex gap-1 mt-1">
+                            <input id="mst-new-area" type="text" placeholder="新エリア名" class="flex-1 border rounded px-2 py-1">
+                            <button onclick="addMasterOption('areas', 'mst-new-area')" class="bg-slate-800 text-white px-2.5 py-1 rounded font-bold">追加</button>
+                        </div>
+                        <div id="mst-list-areas" class="flex flex-wrap gap-1 mt-1.5"></div>
+                    </div>
+                    <div class="pt-2 border-t">
+                        <label class="font-bold text-slate-600">棚番号一覧</label>
+                        <div class="flex gap-1 mt-1">
+                            <input id="mst-new-shelf" type="text" placeholder="新棚番号 (例: 棚D-01)" class="flex-1 border rounded px-2 py-1">
+                            <button onclick="addMasterOption('shelves', 'mst-new-shelf')" class="bg-slate-800 text-white px-2.5 py-1 rounded font-bold">追加</button>
+                        </div>
+                        <div id="mst-list-shelves" class="flex flex-wrap gap-1 mt-1.5"></div>
+                    </div>
+                    <div class="pt-2 border-t">
+                        <label class="font-bold text-slate-600">段（何段目）一覧</label>
+                        <div class="flex gap-1 mt-1">
+                            <input id="mst-new-level" type="text" placeholder="新段名 (例: 5段目)" class="flex-1 border rounded px-2 py-1">
+                            <button onclick="addMasterOption('levels', 'mst-new-level')" class="bg-slate-800 text-white px-2.5 py-1 rounded font-bold">追加</button>
+                        </div>
+                        <div id="mst-list-levels" class="flex flex-wrap gap-1 mt-1.5"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 単位・メーカーマスタ -->
+            <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-2">
+                <h4 class="font-bold text-sm text-slate-800">📦 単位・メーカーマスタ</h4>
+                <div class="space-y-2 text-xs">
+                    <div>
+                        <label class="font-bold text-slate-600">単位の種類（個・箱・ケース・kg等）</label>
+                        <div class="flex gap-1 mt-1">
+                            <input id="mst-new-unit" type="text" placeholder="新しい単位 (例: パレット)" class="flex-1 border rounded px-2 py-1">
+                            <button onclick="addMasterOption('units', 'mst-new-unit')" class="bg-slate-800 text-white px-2.5 py-1 rounded font-bold">追加</button>
+                        </div>
+                        <div id="mst-list-units" class="flex flex-wrap gap-1 mt-1.5"></div>
+                    </div>
+                    <div class="pt-2 border-t">
+                        <label class="font-bold text-slate-600">メーカー一覧</label>
+                        <div class="flex gap-1 mt-1">
+                            <input id="mst-new-maker" type="text" placeholder="新メーカー名" class="flex-1 border rounded px-2 py-1">
+                            <button onclick="addMasterOption('makers', 'mst-new-maker')" class="bg-slate-800 text-white px-2.5 py-1 rounded font-bold">追加</button>
+                        </div>
+                        <div id="mst-list-makers" class="flex flex-wrap gap-1 mt-1.5"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 作業スタッフ（最大15名）＆管理者暗証番号 -->
+            <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-2">
+                <h4 class="font-bold text-sm text-slate-800">👥 作業担当者（最大15名）＆ 管理者ロック</h4>
+                <p class="text-[11px] text-slate-500">カンマ区切りで最大15名のスタッフ名を設定できます。</p>
+                <textarea id="mst-workers-input" rows="4" class="w-full border rounded-lg p-2 text-xs"></textarea>
+                <button onclick="saveWorkersList()" class="w-full bg-blue-600 text-white font-bold text-xs py-2 rounded-lg">
+                    担当者リストを更新
+                </button>
+
+                <div class="pt-3 border-t space-y-1 text-xs">
+                    <label class="font-bold text-slate-600 block">🔒 PC管理画面の暗証番号（PINコード）</label>
+                    <div class="flex gap-1">
+                        <input id="mst-admin-pin" type="text" class="flex-1 border rounded px-2 py-1 font-mono" placeholder="初期値: 1234">
+                        <button onclick="updateAdminPin()" class="bg-slate-800 text-white px-3 py-1 rounded font-bold">PIN変更</button>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- 汎用モーダル -->
+    <div id="modal-overlay" class="fixed inset-0 bg-black/75 hidden items-center justify-center p-3 z-50">
+        <div class="bg-white rounded-2xl w-full max-w-2xl p-4 sm:p-5 shadow-2xl border border-slate-300 max-h-[92vh] overflow-y-auto">
+            <div class="flex justify-between items-center border-b border-slate-200 pb-2 mb-3">
+                <h3 id="modal-title" class="text-base font-bold text-slate-800">タイトル</h3>
+                <button onclick="closeModal()" class="text-slate-400 hover:text-slate-700 text-xl font-bold px-2">×</button>
+            </div>
+            <div id="modal-body" class="space-y-3 text-xs sm:text-sm"></div>
+        </div>
+    </div>
+
+    <!-- トースト通知 -->
+    <div id="toast-box" class="fixed bottom-3 right-3 left-3 sm:left-auto bg-slate-900 text-white border-l-4 border-amber-400 px-3.5 py-2.5 rounded-xl shadow-xl text-xs font-bold hidden z-50"></div>
+
+    <!-- キャッシュ防止クエリ(?v=5)付きで分割スクリプトを読み込み -->
+    <script src="app-core.js?v=5"></script>
+    <script src="app-ui.js?v=5"></script>
+</body>
+</html>
