@@ -1,6 +1,7 @@
 /**
- * app-ui.js
- * UI制御・リストタップ時の明るい音声読み上げ・後から追加登録・GAS API設定＆完全バックアップ機能
+ * app-ui.js (v4)
+ * ・UIの「⚙️接続」ボタンからGASのURLを後から安全に登録・保存・共有リンク生成する機能
+ * ・スマホ上部テンキー操作・後から発見した在庫の追加履歴管理・PC管理者ダッシュボード・完全バックアップ機能
  */
 
 window.addEventListener('DOMContentLoaded', () => {
@@ -14,6 +15,92 @@ window.addEventListener('DOMContentLoaded', () => {
         updateSyncStatusDot('offline');
     }
 });
+
+/**
+ * 左上の「⚙️接続」ボタンからいつでも開けるGAS URL設定＆スタッフ共有リンク発行モーダル
+ */
+function openGasConfigModal() {
+    SFX.key();
+    const currentUrl = getActiveGasUrl();
+    const isConnected = Boolean(currentUrl);
+
+    document.getElementById('modal-title').textContent = '⚙️ スプレッドシート(GAS) 接続設定';
+    document.getElementById('modal-body').innerHTML = `
+        <div class="space-y-3">
+            <div class="p-3 rounded-xl border ${isConnected ? 'bg-emerald-50 border-emerald-300' : 'bg-amber-50 border-amber-300'} text-xs space-y-1">
+                <div class="font-bold ${isConnected ? 'text-emerald-900' : 'text-amber-900'}">
+                    ${isConnected ? '✅ 現在GAS URLが設定されています（この端末のみに安全に保存）' : '⚠️ GASのURLがまだ設定されていません'}
+                </div>
+                <p class="text-[11px] text-slate-600">
+                    公開コード内にURLを書かずに、この画面から入力することであなたのスマホ・PCのブラウザ内部だけに安全に記憶されます。
+                </p>
+            </div>
+
+            <div>
+                <label class="font-bold text-slate-700 block mb-1 text-xs">🔗 GAS ウェブアプリのURL（.../exec）：</label>
+                <input id="gas-modal-url-input" type="url" value="${currentUrl}"
+                       placeholder="https://script.google.com/macros/s/XXXX/exec"
+                       class="w-full border-2 border-blue-400 rounded-xl px-3 py-2 text-xs font-mono bg-white">
+            </div>
+
+            <div class="flex flex-wrap gap-2">
+                <button onclick="saveGasUrlFromModal()" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 px-4 rounded-xl text-xs shadow">
+                    💾 URLを保存して今すぐ同期
+                </button>
+                <button onclick="clearGasUrlFromModal()" class="bg-rose-100 text-rose-700 font-bold py-2.5 px-3 rounded-xl text-xs">
+                    クリア
+                </button>
+            </div>
+
+            <div class="border-t pt-3 space-y-1.5">
+                <label class="font-bold text-slate-700 block text-xs">👥 他の作業スタッフ（最大15名）のスマホへ設定を配る：</label>
+                <p class="text-[11px] text-slate-500">
+                    下のボタンを押すと、GASのURLが自動セットされる配布用リンクをコピーできます。LINEやメールでスタッフに送って開いてもらうだけで設定が完了します（開いた直後にアドレスバーからGASのURLは自動で隠れます）。
+                </p>
+                <button onclick="copyStaffShareLink()" class="w-full bg-slate-800 hover:bg-slate-700 text-amber-300 font-bold py-2.5 px-3 rounded-xl text-xs">
+                    📋 スタッフ配布用リンク（GAS自動設定付き）をコピー
+                </button>
+            </div>
+        </div>
+    `;
+    openModal();
+}
+
+function saveGasUrlFromModal() {
+    const val = document.getElementById('gas-modal-url-input').value.trim();
+    if (!val) {
+        SFX.err();
+        showToast('GASのURLを入力してください');
+        return;
+    }
+    setActiveGasUrl(val);
+    closeModal();
+    SFX.next();
+    fetchAllFromGasApi(true);
+}
+
+function clearGasUrlFromModal() {
+    setActiveGasUrl('');
+    document.getElementById('gas-modal-url-input').value = '';
+    updateSyncStatusDot('offline');
+    showToast('この端末のGAS接続URLを消去しました');
+}
+
+function copyStaffShareLink() {
+    const val = (document.getElementById('gas-modal-url-input')?.value || getActiveGasUrl()).trim();
+    if (!val) {
+        SFX.err();
+        showToast('先にGASのURLを入力してください');
+        return;
+    }
+    setActiveGasUrl(val);
+    const baseUrl = window.location.origin + window.location.pathname;
+    const shareUrl = `${baseUrl}?gas=${encodeURIComponent(val)}`;
+    navigator.clipboard.writeText(shareUrl).then(() => {
+        SFX.next();
+        showToast('📋 スタッフ配布用リンクをコピーしました！');
+    });
+}
 
 function renderWorkerSelect() {
     const sel = document.getElementById('worker-select');
@@ -173,7 +260,6 @@ function renderMobileDetailsAndList() {
 }
 
 function selectRecordById(id, autoSpeak = false) {
-    unlockTtsOnFirstTap();
     appState.selectedRecordId = id;
     appState.inputBuffer = '';
     SFX.key();
@@ -200,7 +286,6 @@ function applyBufferToCurrentRecord() {
 }
 
 function pressNumKey(digit) {
-    unlockTtsOnFirstTap();
     SFX.key();
     if (appState.inputBuffer.length >= 5) return;
     if (appState.inputBuffer === '0') appState.inputBuffer = '';
@@ -226,7 +311,6 @@ function backspaceQty() {
 }
 
 function adjustQty(delta) {
-    unlockTtsOnFirstTap();
     SFX.key();
     const rec = getCurrentRecord();
     rec.baseQty = Math.max(0, (Number(rec.baseQty) || 0) + delta);
@@ -235,7 +319,6 @@ function adjustQty(delta) {
 }
 
 function copyPrevQty() {
-    unlockTtsOnFirstTap();
     SFX.key();
     const rec = getCurrentRecord();
     rec.baseQty = rec.prevQty;
@@ -244,7 +327,6 @@ function copyPrevQty() {
 }
 
 function confirmAndNextRecord() {
-    unlockTtsOnFirstTap();
     const rec = getCurrentRecord();
     if (!rec) return;
     rec.counted = true;
@@ -273,7 +355,6 @@ function confirmAndNextRecord() {
 }
 
 function movePrevRecord() {
-    unlockTtsOnFirstTap();
     SFX.key();
     appState.inputBuffer = '';
     if (isCameraRunning) resumeCameraScan();
@@ -295,7 +376,7 @@ function handleBarcodeScan(janCode) {
     if (matches.length === 0) {
         SFX.err();
         showToast(`未登録JAN (${code}) です。新規商品登録を開きます`);
-        speakText('未登録のバーコードです。新規登録画面を開きます');
+        speakText('未登録のバーコードです。新規登録を開きます');
         openNewMasterModal(code);
         return;
     }
@@ -469,7 +550,7 @@ function commitAddFoundStock(jan) {
     SFX.next();
     syncRecordToGasSheet(targetRec, newLog);
     renderAllViews();
-    speakText(`${area}、${shelf}に、${addedQty}${baseProduct.unit}を追加登録しました！`);
+    speakText(`${area}、${shelf}に、${addedQty}${baseProduct.unit}を追加しました！`);
     showToast(`「${area}/${shelf}/${level}」に ＋${addedQty}${baseProduct.unit} を追加記録しました`);
 }
 
@@ -588,7 +669,7 @@ function requestAdminView() {
 
     document.getElementById('modal-title').textContent = '🔒 管理者専用メニュー（暗証番号認証）';
     document.getElementById('modal-body').innerHTML = `
-        <p class="text-slate-600 text-xs">PC管理画面（全体進捗・二軸集計・マスタ編集・GAS接続設定）は管理者のみ閲覧可能です。暗証番号を入力してください。（初期値: <b>1234</b>）</p>
+        <p class="text-slate-600 text-xs">PC管理画面（全体進捗・二軸集計・マスタ編集）は管理者のみ閲覧可能です。暗証番号を入力してください。（初期値: <b>1234</b>）</p>
         <input id="admin-pin-input" type="password" inputmode="numeric" placeholder="暗証番号を入力"
                onkeydown="if(event.key==='Enter') verifyAdminPin()"
                class="w-full border-2 border-slate-400 rounded-xl px-3 py-2 text-center text-lg font-mono tracking-widest">
@@ -618,14 +699,14 @@ function verifyAdminPin() {
 function showAdminView() {
     document.getElementById('mobile-view').classList.add('hidden');
     document.getElementById('admin-view').classList.remove('hidden');
-    document.getElementById('btn-mode-switch').textContent = '📱スマホへ';
+    document.getElementById('btn-mode-switch').textContent = '📱スマホ';
     renderAllViews();
 }
 
 function switchToMobileView() {
     document.getElementById('admin-view').classList.add('hidden');
     document.getElementById('mobile-view').classList.remove('hidden');
-    document.getElementById('btn-mode-switch').textContent = '💻管理PC';
+    document.getElementById('btn-mode-switch').textContent = '🔒管理';
     renderAllViews();
 }
 
@@ -856,18 +937,10 @@ function buildSpreadsheetText(mode = 'locations', delimiter = ',') {
 function openSpreadsheetModal() {
     SFX.key();
     const preview = buildSpreadsheetText('locations', ',');
-    document.getElementById('modal-title').textContent = '📊 GASスプレッドシートAPI設定 ＆ CSV出力';
+    document.getElementById('modal-title').textContent = '📊 CSVダウンロード ＆ スプレッドシート貼付コピー';
     document.getElementById('modal-body').innerHTML = `
         <div class="space-y-2.5">
-            <div class="bg-blue-50 border border-blue-200 p-3 rounded-xl space-y-1.5">
-                <label class="font-bold text-blue-900 block text-xs">🔗 ステップ1で取得したGAS ウェブアプリURL（/exec）：</label>
-                <div class="flex gap-1">
-                    <input id="gas-url-input" type="text" value="${getActiveGasUrl()}" placeholder="https://script.google.com/macros/s/XXXX/exec" class="flex-1 border border-blue-300 rounded-lg px-2 py-1.5 text-xs font-mono bg-white">
-                    <button onclick="saveGasWebhookUrl()" class="bg-blue-600 text-white font-bold px-3 py-1.5 rounded-lg text-xs shrink-0">保存して同期</button>
-                </div>
-            </div>
-
-            <label class="font-bold text-slate-700 block text-xs pt-1">出力・コピーする集計軸を選択：</label>
+            <label class="font-bold text-slate-700 block text-xs">出力・コピーする集計軸を選択：</label>
             <div class="grid grid-cols-3 gap-1.5 text-xs">
                 <button onclick="updateSheetPreview('locations')" class="bg-blue-600 text-white font-bold py-2 rounded-lg">📍 場所別明細</button>
                 <button onclick="updateSheetPreview('products')" class="bg-indigo-600 text-white font-bold py-2 rounded-lg">📦 商品別合算</button>
@@ -913,12 +986,6 @@ function copyCurrentSheetTsv() {
     });
 }
 
-function saveGasWebhookUrl() {
-    masterData.gasWebhookUrl = document.getElementById('gas-url-input').value.trim();
-    saveToLocalStorage();
-    fetchAllFromGasApi(true);
-}
-
 // ==========================================================
 // バックアップ機能（全データJSON ＆ フルソースコード結合コピー/ダウンロード）
 // ==========================================================
@@ -927,11 +994,11 @@ async function buildFullSourceBundleText() {
     let coreJs = '';
     let uiJs = '';
     try {
-        const r1 = await fetch('app-core.js');
+        const r1 = await fetch('app-core.js?v=4');
         if (r1.ok) coreJs = await r1.text();
     } catch (e) {}
     try {
-        const r2 = await fetch('app-ui.js');
+        const r2 = await fetch('app-ui.js?v=4');
         if (r2.ok) uiJs = await r2.text();
     } catch (e) {}
 
@@ -943,9 +1010,11 @@ async function buildFullSourceBundleText() {
 
 function openBackupModal() {
     SFX.key();
+    // バックアップ出力時にもGASのURLが不用意に外へ出ないよう、必要データのみ整形
+    const safeMaster = Object.assign({}, masterData, { gasWebhookUrl: '' });
     const fullStateJson = JSON.stringify({
         exportedAt: formatNow(),
-        masterData,
+        masterData: safeMaster,
         inventoryRecords,
         addStockLogs
     }, null, 2);
